@@ -12,3 +12,7 @@
 - **数据安全边界**：**音频数据永不修改**；元数据仅在 R5 用户显式写回操作下由写回模块写入（需带音频数据块写前后哈希校验、写前备份与原子替换）。ME 数据库与缓存只读，不把私有素材、路径日志、索引或模型提交到 Git。
 - **依赖与环境**：使用 `uv sync --locked`；跨模块时间均为原文件秒数，区间 `[start, end)`，声道从 0 开始。
 - **验证原则**：保留对核心行为（增量扫描、FTS 语法、音频缓冲、UI 交互）的自动化行为测试与真实数据实测，以可运行版本与实际使用体验为准；不写只检查源码字符串的测试。
+- **Git 分支、Worktree 与发版隔离**：
+  - 禁止直接在 `main` 上进行新功能开发或未验收改动；动工前先核对当前分支与 `git status`，单任务切独立分支（如 `feat/<name>`、`fix/<name>`），多对话并行修改同一仓库时使用独立 `git worktree`（如 `git worktree add ..\AudioSearchTool-wt-<name> -b feat/<name> main`）。
+  - 提交与发版前**禁止无脑 `git add -A`**，必须先核对 `git status` 与改动文件清单并仅暂存当前任务相关文件；若工作区混有其他任务未提交改动，必须先停下确认或隔离，严禁顺手带入 `main` 或 `v*` Release tag。
+  - Worktree 复用环境技巧：未变更依赖时可通过 `$env:UV_PROJECT_ENVIRONMENT` 复用主仓库 `.venv`，或通过目录联接（Junction）共享 `.local/` 缓存；涉及依赖新增时在对应 worktree 单独执行 `uv sync --locked`。
