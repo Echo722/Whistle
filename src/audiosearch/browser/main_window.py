@@ -1674,6 +1674,9 @@ class BrowserWindow(QMainWindow):
         )
         self.folder_tree.filesDroppedOnCollection.connect(self._on_files_dropped_on_collection)
         self.folder_tree.urlsDroppedOnCollection.connect(self._on_urls_dropped_on_collection)
+        self.folder_tree.rootsReordered.connect(self._on_roots_reordered)
+        self.folder_tree.collectionsReordered.connect(self._on_collections_reordered)
+        self.folder_tree.collectionFolderMoved.connect(self._on_collection_folder_moved)
         self.folder_tree.importReaperShortcutsRequested.connect(
             lambda: self._on_import_reaper_shortcuts()
         )
@@ -2757,7 +2760,25 @@ class BrowserWindow(QMainWindow):
     def _open_update_dialog(self) -> None:
         dlg = UpdateDialog(initial_result=self._latest_update_result, parent=self)
         dlg.restartRequested.connect(self._restart_application)
+        dlg.cudaUpgradeRestartRequested.connect(self._apply_cuda_upgrade_and_restart)
         dlg.exec()
+
+    @Slot(str)
+    def _apply_cuda_upgrade_and_restart(self, script_path: str) -> None:
+        from audiosearch.browser.cuda_updater import launch_apply_cuda_script
+
+        self._flush_saved_settings()
+        if self._ai_indexer is not None:
+            self._ai_indexer.cancel()
+        try:
+            self.audition.stop()
+        except Exception:
+            pass
+        launch_apply_cuda_script(Path(script_path))
+        self.close()
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     @Slot()
     def _restart_application(self) -> None:
@@ -3771,6 +3792,64 @@ class BrowserWindow(QMainWindow):
         self._refresh_dirty_status()
         self._refresh_active_view()
 
+    @Slot(list)
+    def _on_roots_reordered(self, root_ids: list) -> None:
+        self.store.reorder_roots([int(rid) for rid in root_ids])
+        self.folder_tree.reload(keep_location=self._location, keep_target=self._active_sidebar)
+
+    @Slot(list)
+    def _on_collections_reordered(self, collection_ids: list) -> None:
+        self.store.reorder_collections([int(cid) for cid in collection_ids])
+        self.folder_tree.reload(keep_location=self._location, keep_target=self._active_sidebar)
+
+    @Slot(int, int, int)
+    def _on_collection_folder_moved(
+        self, entry_id: int, target_collection_id: int, target_index: int
+    ) -> None:
+        moved = self.store.move_or_reorder_collection_folder(
+            int(entry_id), int(target_collection_id), int(target_index)
+        )
+        if not moved:
+            return
+        collapsed = set(self.folder_tree.collapsed_collection_ids())
+        layout_changed = int(target_collection_id) in collapsed
+        if layout_changed:
+            collapsed.discard(int(target_collection_id))
+            self.folder_tree.set_collapsed_collection_ids(collapsed)
+
+        if (
+            self._active_sidebar is not None
+            and self._active_sidebar.kind == KIND_COLLECTION_FOLDER
+        ):
+            target_cfs = self.store.list_collection_folders(int(target_collection_id))
+            matched = next(
+                (
+                    cf
+                    for cf in target_cfs
+                    if cf.id == int(entry_id)
+                    or (
+                        cf.root_id == self._active_sidebar.root_id
+                        and cf.folder_rel_path == self._active_sidebar.folder_rel_path
+                    )
+                ),
+                None,
+            )
+            if matched is not None:
+                self._active_sidebar = SidebarViewTarget(
+                    kind=KIND_COLLECTION_FOLDER,
+                    collection_id=matched.collection_id,
+                    root_id=matched.root_id,
+                    folder_id=matched.folder_id,
+                    folder_rel_path=matched.folder_rel_path,
+                    display_path=self._active_sidebar.display_path,
+                )
+
+        self.folder_tree.reload(keep_location=self._location, keep_target=self._active_sidebar)
+        if layout_changed:
+            self._schedule_save_settings()
+        if self._active_sidebar is not None and self._active_sidebar.kind == KIND_COLLECTION:
+            self._refresh_active_view()
+
     @Slot(int, int, object, str, str)
     def _on_add_folder_to_collection(
         self,
@@ -4116,6 +4195,18 @@ class BrowserWindow(QMainWindow):
                 report = indexer.run(on_progress=lambda p: self._ai_index_signals.progress.emit(p))
                 self._ai_index_signals.done.emit(report)
             except Exception as exc:
+                try:
+                    import traceback
+                    from datetime import datetime
+
+                    log_path = self.store.db_path.parent / "logs" / "browser-crash.log"
+                    log_path.parent.mkdir(parents=True, exist_ok=True)
+                    ts = datetime.now().isoformat(timespec="seconds")
+                    with log_path.open("a", encoding="utf-8") as fh:
+                        fh.write(f"\n[{ts}] AI indexing failed\n")
+                        traceback.print_exception(type(exc), exc, exc.__traceback__, file=fh)
+                except OSError:
+                    pass
                 self._ai_index_signals.failed.emit(str(exc))
 
         self._ai_index_thread = threading.Thread(target=run_index, daemon=True)
@@ -4147,7 +4238,14 @@ class BrowserWindow(QMainWindow):
     @Slot(str)
     def _on_ai_index_failed(self, message: str) -> None:
         self.ai_index_btn.setText("AI 建库")
-        self.status_ai.setText(f"AI 建库失败: {message}")
+        lines = [line.strip() for line in str(message).splitlines() if line.strip()]
+        summary = lines[0] if lines else "未知错误"
+        if len(summary) > 96:
+            summary = summary[:95] + "…"
+        self.status_ai.setText(f"AI 建库失败: {summary}")
+        self.status_ai.setToolTip(
+            f"AI 建库失败：\n{message}\n\n完整堆栈已写入 logs/browser-crash.log"
+        )
 
     def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
         super().showEvent(event)

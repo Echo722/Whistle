@@ -1211,3 +1211,142 @@ def test_sidebar_branch_hitbox_and_settings_dialog_live_scale_and_audio_device(
     finally:
         win.close()
         app.processEvents()
+
+
+def test_sidebar_drag_drop_reorder_and_table_vertical_column_dividers(tmp_path: Path) -> None:
+    from PySide6.QtCore import QMimeData, QRect
+    from PySide6.QtGui import QDropEvent, QPainter, QPixmap
+    from PySide6.QtWidgets import QStyle, QStyleOptionViewItem
+
+    from audiosearch.browser.file_drag import FILE_IDS_MIME
+    from audiosearch.browser.folder_tree import KIND_SECTION_DIVIDER, _COUNT_ROLE, _KIND_ROLE
+    from audiosearch.browser.waveform_delegate import COLUMN_DIVIDER, COLUMN_DIVIDER_SELECTED
+
+    app = create_app()
+    root_a = tmp_path / "AlphaRoot"
+    root_b = tmp_path / "BetaRoot"
+    _write_wav(root_a / "Pack1" / "s1.wav", duration_sec=0.3)
+    _write_wav(root_a / "Pack2" / "s2.wav", duration_sec=0.3)
+    _write_wav(root_b / "Pack3" / "s3.wav", duration_sec=0.3)
+
+    db_path = tmp_path / "wave4a.sqlite3"
+    store = LibraryStore(db_path)
+    ra = store.add_root(root_a)
+    rb = store.add_root(root_b)
+    c1 = store.create_collection("合集一")
+    c2 = store.create_collection("合集二")
+    store.close()
+    LibraryScanner(db_path).scan_root(ra.id)
+    LibraryScanner(db_path).scan_root(rb.id)
+
+    store = LibraryStore(db_path)
+    f_p1 = next(f for f in store.list_folders(ra.id, None) if f.name == "Pack1")
+    f_p2 = next(f for f in store.list_folders(ra.id, None) if f.name == "Pack2")
+    store.add_folder_to_collection(c1.id, ra.id, f_p1.id, f_p1.rel_path, "Pack1")
+    store.add_folder_to_collection(c1.id, ra.id, f_p2.id, f_p2.rel_path, "Pack2")
+    store.close()
+
+    win = BrowserWindow(db_path, audition=_FakeAudition(), spot_client=_FakeSpotClient())
+    win.show()
+    _pump(app, timeout_sec=2.0, cond=lambda: win.table_model.rowCount() == 3)
+    try:
+        tree = win.folder_tree
+        tree.set_local_roots_expanded(True)
+        _pump(app, timeout_sec=0.1)
+
+        def _drop_node(src_item, target_pos: QPoint) -> bool:
+            payload = tree._sidebar_drag_payload(src_item)
+            assert payload is not None
+            mime = QMimeData()
+            mime.setData(
+                "application/x-audiosearch-sidebar-node",
+                json.dumps(payload).encode("utf-8"),
+            )
+            ev = QDropEvent(
+                target_pos,
+                Qt.DropAction.MoveAction,
+                mime,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+            tree.dropEvent(ev)
+            return ev.isAccepted()
+
+        # #011-a: Reorder roots (drag BetaRoot above AlphaRoot)
+        item_ra = tree.find_root_item(ra.id)
+        item_rb = tree.find_root_item(rb.id)
+        assert item_ra is not None and item_rb is not None
+        rect_ra = tree.visualItemRect(item_ra)
+        assert _drop_node(item_rb, QPoint(rect_ra.center().x(), rect_ra.top() + 2)) is True
+        assert [r.id for r in win.store.list_roots()] == [rb.id, ra.id]
+        assert tree._ordered_root_ids() == [rb.id, ra.id]
+
+        # #011-b: Invalid drop target (dragging a root onto Favorites) is ignored safely
+        fav_item = tree.find_quick_item(KIND_FAVORITES)
+        assert fav_item is not None
+        assert _drop_node(tree.find_root_item(ra.id), tree.visualItemRect(fav_item).center()) is False
+
+        # #011-c: Reorder collections (drag 合集二 above 合集一)
+        col_items = tree._ordered_collection_items()
+        assert [c.text(0) for c in col_items] == ["合集一", "合集二"]
+        rect_c1 = tree.visualItemRect(col_items[0])
+        assert _drop_node(col_items[1], QPoint(rect_c1.center().x(), rect_c1.top() + 2)) is True
+        assert [c.id for c in win.store.list_collections()] == [c2.id, c1.id]
+
+        # #011-d: Move collection folder across collections (drop Pack2 onto collapsed/empty 合集二 header)
+        col_items = tree._ordered_collection_items()
+        c2_item, c1_item = col_items[0], col_items[1]
+        assert c2_item.text(0) == "合集二" and c1_item.text(0) == "合集一"
+        pack2_item = c1_item.child(1)
+        assert pack2_item.text(0) == "Pack2"
+        tree.set_collapsed_collection_ids([c2.id])
+        assert _drop_node(pack2_item, tree.visualItemRect(c2_item).center()) is True
+        assert [cf.label for cf in win.store.list_collection_folders(c2.id)] == ["Pack2"]
+        assert [cf.label for cf in win.store.list_collection_folders(c1.id)] == ["Pack1"]
+        # Auto-expands target collection so moved folder is immediately visible
+        assert c2.id not in tree.collapsed_collection_ids()
+
+        # #011-e: Normal file drop onto collection still works alongside sidebar drag
+        rec0 = win.table_model.record_at(0)
+        assert rec0 is not None
+        file_mime = QMimeData()
+        file_mime.setData(FILE_IDS_MIME, json.dumps([rec0.id]).encode("utf-8"))
+        c2_item_now = tree._ordered_collection_items()[0]
+        file_drop = QDropEvent(
+            tree.visualItemRect(c2_item_now).center(),
+            Qt.DropAction.CopyAction,
+            file_mime,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        tree.dropEvent(file_drop)
+        assert file_drop.isAccepted() is True
+
+        # #012: Audio table paints vertical column dividers aligned with header without horizontal grid
+        assert win.table_view.showGrid() is False
+        col_keys = [c[0] for c in COLUMNS]
+        fn_col = col_keys.index("filename")
+        wf_col = col_keys.index("waveform")
+
+        for selected_state, expected_color in (
+            (QStyle.StateFlag.State_None, COLUMN_DIVIDER),
+            (QStyle.StateFlag.State_Selected | QStyle.StateFlag.State_Active, COLUMN_DIVIDER_SELECTED),
+        ):
+            for col in (fn_col, wf_col):
+                pm = QPixmap(120, 28)
+                pm.fill(Qt.GlobalColor.black)
+                p = QPainter(pm)
+                opt = QStyleOptionViewItem()
+                opt.rect = QRect(0, 0, 120, 28)
+                opt.state = QStyle.StateFlag.State_Enabled | selected_state
+                opt.widget = win.table_view
+                idx = win.table_model.index(0, col)
+                delegate = win.table_view.itemDelegateForColumn(col) or win.table_view.itemDelegate()
+                delegate.paint(p, opt, idx)
+                p.end()
+                img = pm.toImage()
+                assert img.pixelColor(119, 14) == expected_color
+        assert _KIND_ROLE is not None and _COUNT_ROLE is not None and KIND_SECTION_DIVIDER != ""
+    finally:
+        win.close()
+        app.processEvents()

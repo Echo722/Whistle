@@ -18,7 +18,7 @@ from typing import Any
 from audiosearch.browser.runtime_paths import executable_dir, is_frozen
 
 APP_NAME = "Whistle"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.1"
 RUNTIME_ABI = 1
 DEFAULT_GITHUB_REPO = "Echo722/Whistle"
 

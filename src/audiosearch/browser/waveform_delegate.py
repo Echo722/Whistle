@@ -28,6 +28,8 @@ PAD_Y = 3
 
 ZERO_LINE = QColor("#34322E")
 ZERO_LINE_SELECTED = QColor("#594238")
+COLUMN_DIVIDER = QColor("#2B2926")
+COLUMN_DIVIDER_SELECTED = QColor("#5A3E33")
 END_CAP = QColor("#45423B")
 PEAK_NORMAL = QColor("#878177")
 PEAK_SELECTED = QColor("#D5CEC2")
@@ -52,19 +54,27 @@ def _first_visible_visual_col(table: QTableView) -> int:
 def paint_selection_chrome(
     painter: QPainter, opt: QStyleOptionViewItem, index: QModelIndex
 ) -> None:
-    """Paint top/bottom row borders and 3px left accent bar on selected cells."""
-    if not (opt.state & QStyle.StateFlag.State_Selected):
-        return
-    is_active = bool(opt.state & QStyle.StateFlag.State_Active)
-    border_color = theme.SELECT_BORDER if is_active else theme.SELECT_BORDER_INACTIVE
-    mark_color = theme.SELECT_MARK if is_active else theme.SELECT_MARK_INACTIVE
+    """Paint subtle vertical column dividers plus top/bottom selection borders and left accent bar."""
     r = opt.rect
     if not r.isValid():
         return
+    is_selected = bool(opt.state & QStyle.StateFlag.State_Selected)
 
     painter.save()
     try:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        if not is_selected:
+            painter.setPen(QPen(COLUMN_DIVIDER, 1))
+            painter.drawLine(r.right(), r.top(), r.right(), r.bottom())
+            return
+
+        is_active = bool(opt.state & QStyle.StateFlag.State_Active)
+        border_color = theme.SELECT_BORDER if is_active else theme.SELECT_BORDER_INACTIVE
+        mark_color = theme.SELECT_MARK if is_active else theme.SELECT_MARK_INACTIVE
+
+        if r.height() >= 3:
+            painter.setPen(QPen(COLUMN_DIVIDER_SELECTED, 1))
+            painter.drawLine(r.right(), r.top() + 1, r.right(), r.bottom() - 1)
         painter.setPen(QPen(border_color, 1))
         painter.drawLine(r.left(), r.top(), r.right(), r.top())
         painter.drawLine(r.left(), r.bottom(), r.right(), r.bottom())

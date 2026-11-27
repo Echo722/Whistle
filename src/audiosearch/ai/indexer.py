@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import math
 import os
 import threading
 import time
@@ -27,11 +26,20 @@ MAX_WINDOWS_PER_FILE = 24
 MIN_CLAP2_AUDIO_SEC = 0.25
 
 
+def _has_whistle_model_snapshot(cache_root: Path) -> bool:
+    """Return True when ``cache_root`` contains a Whistle text or audio model snapshot."""
+    hub = cache_root / "hub"
+    return (
+        (hub / "models--Qwen--Qwen3-Embedding-0.6B" / "snapshots").is_dir()
+        or (hub / "models--laion--clap2-large-audioxl-s1B" / "snapshots").is_dir()
+    )
+
+
 def resolve_hf_cache_root(
     db_path: str | Path | None = None,
     cache_root: str | Path | None = None,
 ) -> Path | None:
-    """Find local HF cache (explicit -> AUDIOSEARCH_MODELS_DIR -> HF_HOME -> db_dir -> frozen -> .local)."""
+    """Find local HF cache (explicit -> AUDIOSEARCH_MODELS_DIR -> snapshot -> hub -> HF_HOME)."""
     import sys
 
     if cache_root is not None:
@@ -44,9 +52,7 @@ def resolve_hf_cache_root(
         if (base / "hf" / "hub").is_dir():
             return base / "hf"
         return base
-    env_hf = os.environ.get("HF_HOME")
-    if env_hf:
-        return Path(env_hf)
+
     candidates: list[Path] = []
     if db_path is not None:
         candidates.append(Path(db_path).resolve().parent / "models" / "hf")
@@ -55,9 +61,17 @@ def resolve_hf_cache_root(
         candidates.append(exe_dir / "models" / "hf")
         candidates.append(exe_dir / "data" / "models" / "hf")
     candidates.append(Path(".local") / "models" / "hf")
+
+    env_hf = os.environ.get("HF_HOME", "").strip()
+    snapshot_candidates = [*candidates, *([Path(env_hf)] if env_hf else [])]
+    for cand in snapshot_candidates:
+        if _has_whistle_model_snapshot(cand):
+            return cand
     for cand in candidates:
         if (cand / "hub").is_dir():
             return cand
+    if env_hf:
+        return Path(env_hf)
     return None
 
 

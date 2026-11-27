@@ -38,12 +38,10 @@ def default_data_dir() -> Path:
 
     if is_frozen():
         exe_dir = executable_dir()
-        if (
-            (exe_dir / "portable.flag").is_file()
-            or (exe_dir / "data").is_dir()
-            or _dir_is_writable(exe_dir)
-        ):
-            return exe_dir / "data"
+        data_dir = exe_dir / "data"
+        probe_target = data_dir if data_dir.is_dir() else exe_dir
+        if _dir_is_writable(probe_target):
+            return data_dir
         if os.name == "nt":
             base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
             return Path(base) / "AudioSearchTool" / "data"

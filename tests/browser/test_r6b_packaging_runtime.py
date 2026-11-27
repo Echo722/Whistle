@@ -45,11 +45,12 @@ def test_runtime_paths_dev_vs_frozen_and_env(tmp_path: Path, monkeypatch):
     assert default_data_dir() == exe_dir / "data"
     assert default_db_path() == exe_dir / "data" / "library.sqlite3"
 
-    # Simulated read-only Program Files directory falls back to LOCALAPPDATA on Windows
+    # Simulated read-only Program Files directory (even with portable.flag) falls back to LOCALAPPDATA on Windows
     ro_dir = tmp_path / "ProgramFilesBundle"
     ro_dir.mkdir(parents=True)
     ro_exe = ro_dir / "AudioSearchTool.exe"
     ro_exe.write_bytes(b"")
+    (ro_dir / "portable.flag").write_text("portable=1\n", encoding="utf-8")
     local_app = tmp_path / "LocalAppData"
     monkeypatch.setenv("LOCALAPPDATA", str(local_app))
     monkeypatch.setattr("sys.executable", str(ro_exe))
@@ -58,6 +59,7 @@ def test_runtime_paths_dev_vs_frozen_and_env(tmp_path: Path, monkeypatch):
 
 
 def test_resolve_hf_cache_root_env_and_frozen(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("AUDIOSEARCH_MODELS_DIR", raising=False)
     monkeypatch.delenv("HF_HOME", raising=False)
 
@@ -78,7 +80,18 @@ def test_resolve_hf_cache_root_env_and_frozen(tmp_path: Path, monkeypatch):
     fake_exe.write_bytes(b"")
     monkeypatch.setattr("sys.frozen", True, raising=False)
     monkeypatch.setattr("sys.executable", str(fake_exe))
+
+    # Unrelated HF_HOME must not shadow bundled models/hf/hub
+    unrelated_hf = tmp_path / "other_hf"
+    (unrelated_hf / "hub").mkdir(parents=True)
+    monkeypatch.setenv("HF_HOME", str(unrelated_hf))
     assert resolve_hf_cache_root(tmp_path / "elsewhere" / "library.sqlite3") == exe_dir / "models" / "hf"
+
+    # HF_HOME containing actual Whistle snapshots is preferred over empty bundled hub
+    whistle_hf = tmp_path / "whistle_hf"
+    (whistle_hf / "hub" / "models--Qwen--Qwen3-Embedding-0.6B" / "snapshots").mkdir(parents=True)
+    monkeypatch.setenv("HF_HOME", str(whistle_hf))
+    assert resolve_hf_cache_root(tmp_path / "elsewhere" / "library.sqlite3") == whistle_hf
 
 
 def test_app_icon_exists_and_loads_in_qt():
@@ -109,6 +122,8 @@ def test_run_smoke_test_reports_core_ok(tmp_path: Path):
     assert report["core"]["soundfile"] is True
     assert report["core"]["pedalboard"] is True
     assert report["core"]["mutagen"] is True
+    if "cuda_available" in report["ai"]:
+        assert isinstance(report["ai"].get("cuda_usable"), bool)
 
 
 def test_packaging_spec_and_launcher_are_valid():

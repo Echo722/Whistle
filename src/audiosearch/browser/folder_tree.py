@@ -7,11 +7,13 @@ import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-from PySide6.QtCore import QModelIndex, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QMimeData, QModelIndex, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
+    QDrag,
     QDragEnterEvent,
     QDragMoveEvent,
     QDropEvent,
@@ -19,11 +21,13 @@ from PySide6.QtGui import (
     QMouseEvent,
     QPainter,
     QPainterPath,
+    QPaintEvent,
     QPen,
     QPolygonF,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QMenu,
     QStyle,
     QStyledItemDelegate,
@@ -66,6 +70,8 @@ KIND_ADD_COLLECTION = "add_collection"
 
 _DIVIDER_KINDS = frozenset({KIND_COLLECTION, KIND_SECTION_DIVIDER, KIND_ADD_COLLECTION})
 _QUICK_ICON_KINDS = frozenset({_KIND_ALL, KIND_FAVORITES, KIND_RECENT, KIND_DUPLICATES})
+SIDEBAR_NODE_MIME = "application/x-audiosearch-sidebar-node"
+_DRAGGABLE_SIDEBAR_KINDS = frozenset({_KIND_ROOT, KIND_COLLECTION, KIND_COLLECTION_FOLDER})
 
 _LINE_DIVIDER = QColor("#34322E")
 _DIVIDER_TEXT = QColor("#8F8A80")
@@ -377,6 +383,9 @@ class FolderTree(QTreeWidget):
     urlsDroppedOnCollection = Signal(int, list)  # (collection_id, list[str])
     importReaperShortcutsRequested = Signal()
     layoutStateChanged = Signal()
+    rootsReordered = Signal(list)  # list[int]
+    collectionsReordered = Signal(list)  # list[int]
+    collectionFolderMoved = Signal(int, int, int)  # (entry_id, target_collection_id, target_index)
 
     def __init__(self, store: LibraryStore, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -392,6 +401,9 @@ class FolderTree(QTreeWidget):
         self._press_prev_item: QTreeWidgetItem | None = None
         self._collapsed_collections: set[int] = set()
         self._hover_branch_index: QModelIndex = QModelIndex()
+        self._drag_start_pos: QPoint | None = None
+        self._drag_item: QTreeWidgetItem | None = None
+        self._drop_indicator: tuple[QRect, str] | None = None
 
         spec = theme.ui_scale_spec()
         self.setObjectName("sidebarTree")
@@ -402,7 +414,7 @@ class FolderTree(QTreeWidget):
         self.setItemDelegate(self._delegate)
         self.setMouseTracking(True)
         self.setAcceptDrops(True)
-        self.setDropIndicatorShown(True)
+        self.setDropIndicatorShown(False)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
@@ -869,6 +881,18 @@ class FolderTree(QTreeWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         pos = event.position().toPoint()
+        if (
+            (event.buttons() & Qt.MouseButton.LeftButton)
+            and self._drag_item is not None
+            and self._drag_start_pos is not None
+            and (pos - self._drag_start_pos).manhattanLength() >= QApplication.startDragDistance()
+        ):
+            drag_item = self._drag_item
+            self._drag_item = None
+            self._drag_start_pos = None
+            self._start_sidebar_drag(drag_item)
+            event.accept()
+            return
         idx = self.indexAt(pos)
         if not idx.isValid():
             idx = self.indexAt(QPoint(max(0, self.indentation()) + 2, pos.y()))
@@ -886,6 +910,8 @@ class FolderTree(QTreeWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         self._press_prev_item = self.currentItem()
+        self._drag_start_pos = None
+        self._drag_item = None
         if event.button() == Qt.MouseButton.LeftButton:
             pos = event.position().toPoint()
             idx = self.indexAt(pos)
@@ -895,7 +921,16 @@ class FolderTree(QTreeWidget):
                 self.setExpanded(idx, not self.isExpanded(idx))
                 event.accept()
                 return
+            item = self.itemAt(pos)
+            if item is not None and item.data(0, _KIND_ROLE) in _DRAGGABLE_SIDEBAR_KINDS:
+                self._drag_start_pos = QPoint(pos)
+                self._drag_item = item
         super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        self._drag_start_pos = None
+        self._drag_item = None
+        super().mouseReleaseEvent(event)
 
     def _on_item_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
         if self._suppress_signal or item is None:
@@ -1235,21 +1270,268 @@ class FolderTree(QTreeWidget):
             if did_change_layout:
                 self.layoutStateChanged.emit()
 
-    # -- Drag & Drop onto Collection dividers / child nodes ----------------
+    # -- Drag & Drop: sidebar reordering & dropping files into collections -
     @staticmethod
     def _has_droppable_payload(event) -> bool:
         mime = event.mimeData()
-        return bool(mime.hasFormat(FILE_IDS_MIME) or mime.hasUrls())
+        return bool(
+            mime.hasFormat(SIDEBAR_NODE_MIME)
+            or mime.hasFormat(FILE_IDS_MIME)
+            or mime.hasUrls()
+        )
+
+    @staticmethod
+    def _sidebar_drag_payload(item: QTreeWidgetItem) -> dict[str, Any] | None:
+        kind = item.data(0, _KIND_ROLE)
+        if kind == _KIND_ROOT:
+            rid = item.data(0, _ROOT_ID_ROLE)
+            return None if rid is None else {"kind": "root", "root_id": int(rid)}
+        if kind == KIND_COLLECTION:
+            cid = item.data(0, _COLL_ID_ROLE)
+            return None if cid is None else {"kind": "collection", "collection_id": int(cid)}
+        if kind == KIND_COLLECTION_FOLDER:
+            cf_id = item.data(0, _CF_ID_ROLE)
+            cid = item.data(0, _COLL_ID_ROLE)
+            if cf_id is None or cid is None:
+                return None
+            return {
+                "kind": "collection_folder",
+                "cf_id": int(cf_id),
+                "collection_id": int(cid),
+            }
+        return None
+
+    @staticmethod
+    def _parse_sidebar_drag(mime: QMimeData) -> dict[str, Any] | None:
+        if not mime.hasFormat(SIDEBAR_NODE_MIME):
+            return None
+        try:
+            data = json.loads(bytes(mime.data(SIDEBAR_NODE_MIME)).decode("utf-8"))
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _start_sidebar_drag(self, item: QTreeWidgetItem) -> None:
+        payload = self._sidebar_drag_payload(item)
+        if payload is None:
+            return
+        mime = QMimeData()
+        mime.setData(SIDEBAR_NODE_MIME, json.dumps(payload).encode("utf-8"))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.MoveAction)
+        self._set_drop_indicator(None)
+
+    def _set_drop_indicator(self, indicator: tuple[QRect, str] | None) -> None:
+        if indicator != self._drop_indicator:
+            self._drop_indicator = indicator
+            self.viewport().update()
+
+    def _ordered_root_ids(self) -> list[int]:
+        if self._local_div is None:
+            return []
+        out: list[int] = []
+        for idx in range(self._local_div.childCount()):
+            ch = self._local_div.child(idx)
+            if ch.data(0, _KIND_ROLE) == _KIND_ROOT:
+                rid = ch.data(0, _ROOT_ID_ROLE)
+                if rid is not None:
+                    out.append(int(rid))
+        return out
+
+    def _ordered_collection_items(self) -> list[QTreeWidgetItem]:
+        out: list[QTreeWidgetItem] = []
+        for idx in range(self.topLevelItemCount()):
+            top = self.topLevelItem(idx)
+            if top.data(0, _KIND_ROLE) == KIND_COLLECTION:
+                out.append(top)
+        return out
+
+    def _last_visible_descendant_rect(self, item: QTreeWidgetItem) -> QRect:
+        cur = item
+        while cur.isExpanded() and cur.childCount() > 0:
+            last_child = cur.child(cur.childCount() - 1)
+            r = self.visualItemRect(last_child)
+            if not r.isValid():
+                break
+            cur = last_child
+        return self.visualItemRect(cur)
+
+    def _resolve_sidebar_drop(
+        self, payload: dict[str, Any], pos: QPoint
+    ) -> tuple[str, QRect, str, Any, bool] | None:
+        hover = self.itemAt(pos)
+        if hover is None:
+            return None
+        drag_kind = str(payload.get("kind") or "")
+
+        if drag_kind == "root":
+            try:
+                drag_rid = int(payload["root_id"])
+            except (KeyError, TypeError, ValueError):
+                return None
+            ordered_roots = self._ordered_root_ids()
+            if drag_rid not in ordered_roots or self._local_div is None:
+                return None
+            old_idx = ordered_roots.index(drag_rid)
+            cur = hover
+            root_item: QTreeWidgetItem | None = None
+            while cur is not None:
+                if cur.data(0, _KIND_ROLE) == _KIND_ROOT:
+                    root_item = cur
+                    break
+                if cur is self._local_div:
+                    break
+                cur = cur.parent()
+            if hover is self._local_div:
+                rect = self.visualItemRect(self._local_div)
+                if not rect.isValid():
+                    return None
+                raw_idx = 0
+                placement = "below"
+            elif root_item is not None:
+                rect = self.visualItemRect(root_item)
+                if not rect.isValid():
+                    return None
+                idx = ordered_roots.index(int(root_item.data(0, _ROOT_ID_ROLE)))
+                if hover is root_item:
+                    above = pos.y() < rect.center().y()
+                    placement = "above" if above else "below"
+                    raw_idx = idx + (0 if above else 1)
+                else:
+                    rect = self._last_visible_descendant_rect(root_item)
+                    placement = "below"
+                    raw_idx = idx + 1
+            else:
+                return None
+            new_roots = [x for x in ordered_roots if x != drag_rid]
+            ins_idx = raw_idx - 1 if old_idx < raw_idx else raw_idx
+            ins_idx = max(0, min(ins_idx, len(new_roots)))
+            new_roots.insert(ins_idx, drag_rid)
+            return ("reorder_roots", rect, placement, new_roots, new_roots != ordered_roots)
+
+        if drag_kind == "collection":
+            try:
+                drag_cid = int(payload["collection_id"])
+            except (KeyError, TypeError, ValueError):
+                return None
+            coll_items = self._ordered_collection_items()
+            ordered_cids = [int(c.data(0, _COLL_ID_ROLE)) for c in coll_items]
+            if drag_cid not in ordered_cids:
+                return None
+            old_idx = ordered_cids.index(drag_cid)
+            cur = hover
+            col_item: QTreeWidgetItem | None = None
+            while cur is not None:
+                if cur.data(0, _KIND_ROLE) == KIND_COLLECTION:
+                    col_item = cur
+                    break
+                cur = cur.parent()
+            if col_item is None:
+                return None
+            idx = coll_items.index(col_item)
+            if hover is col_item:
+                rect = self.visualItemRect(col_item)
+                if not rect.isValid():
+                    return None
+                above = pos.y() < rect.center().y()
+                placement = "above" if above else "below"
+                raw_idx = idx + (0 if above else 1)
+            else:
+                rect = self._last_visible_descendant_rect(col_item)
+                if not rect.isValid():
+                    rect = self.visualItemRect(col_item)
+                placement = "below"
+                raw_idx = idx + 1
+            new_cids = [x for x in ordered_cids if x != drag_cid]
+            ins_idx = raw_idx - 1 if old_idx < raw_idx else raw_idx
+            ins_idx = max(0, min(ins_idx, len(new_cids)))
+            new_cids.insert(ins_idx, drag_cid)
+            return ("reorder_collections", rect, placement, new_cids, new_cids != ordered_cids)
+
+        if drag_kind == "collection_folder":
+            try:
+                drag_cf_id = int(payload["cf_id"])
+                src_cid = int(payload["collection_id"])
+            except (KeyError, TypeError, ValueError):
+                return None
+            if hover.data(0, _KIND_ROLE) == KIND_COLLECTION:
+                tgt_cid = int(hover.data(0, _COLL_ID_ROLE))
+                rect = self.visualItemRect(hover)
+                if not rect.isValid():
+                    return None
+                child_n = hover.childCount()
+                old_idx = -1
+                for i in range(child_n):
+                    if hover.child(i).data(0, _CF_ID_ROLE) == drag_cf_id:
+                        old_idx = i
+                        break
+                ins_idx = max(0, child_n - 1) if src_cid == tgt_cid else child_n
+                changed = not (src_cid == tgt_cid and ins_idx == old_idx)
+                return ("move_collection_folder", rect, "into", (drag_cf_id, tgt_cid, ins_idx), changed)
+
+            cur = hover
+            cf_item: QTreeWidgetItem | None = None
+            while cur is not None:
+                if cur.data(0, _KIND_ROLE) == KIND_COLLECTION_FOLDER:
+                    cf_item = cur
+                    break
+                cur = cur.parent()
+            if cf_item is None:
+                return None
+            parent_col = cf_item.parent()
+            if parent_col is None or parent_col.data(0, _KIND_ROLE) != KIND_COLLECTION:
+                return None
+            tgt_cid = int(parent_col.data(0, _COLL_ID_ROLE))
+            idx = parent_col.indexOfChild(cf_item)
+            if hover is cf_item:
+                rect = self.visualItemRect(cf_item)
+                if not rect.isValid():
+                    return None
+                above = pos.y() < rect.center().y()
+                placement = "above" if above else "below"
+                raw_idx = idx + (0 if above else 1)
+            else:
+                rect = self._last_visible_descendant_rect(cf_item)
+                if not rect.isValid():
+                    rect = self.visualItemRect(cf_item)
+                placement = "below"
+                raw_idx = idx + 1
+
+            old_idx = -1
+            for i in range(parent_col.childCount()):
+                if parent_col.child(i).data(0, _CF_ID_ROLE) == drag_cf_id:
+                    old_idx = i
+                    break
+            ins_idx = raw_idx - 1 if (src_cid == tgt_cid and 0 <= old_idx < raw_idx) else raw_idx
+            ins_idx = max(0, ins_idx)
+            changed = not (src_cid == tgt_cid and ins_idx == old_idx)
+            return (
+                "move_collection_folder",
+                rect,
+                placement,
+                (drag_cf_id, tgt_cid, ins_idx),
+                changed,
+            )
+
+        return None
+
+    @staticmethod
+    def _collection_item_for_item(item: QTreeWidgetItem | None) -> QTreeWidgetItem | None:
+        cur = item
+        while cur is not None:
+            if cur.data(0, _KIND_ROLE) == KIND_COLLECTION:
+                return cur
+            cur = cur.parent()
+        return None
 
     @staticmethod
     def _collection_id_for_item(item: QTreeWidgetItem | None) -> int | None:
-        cur = item
-        while cur is not None:
-            if cur.data(0, _KIND_ROLE) in (KIND_COLLECTION, KIND_COLLECTION_FOLDER):
-                cid = cur.data(0, _COLL_ID_ROLE)
-                return None if cid is None else int(cid)
-            cur = cur.parent()
-        return None
+        col_item = FolderTree._collection_item_for_item(item)
+        if col_item is None:
+            return None
+        cid = col_item.data(0, _COLL_ID_ROLE)
+        return None if cid is None else int(cid)
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
         if self._has_droppable_payload(event):
@@ -1258,24 +1540,69 @@ class FolderTree(QTreeWidget):
         event.ignore()
 
     def dragMoveEvent(self, event: QDragMoveEvent) -> None:  # noqa: N802
+        mime = event.mimeData()
+        pos = event.position().toPoint()
+        payload = self._parse_sidebar_drag(mime)
+        if payload is not None:
+            resolved = self._resolve_sidebar_drop(payload, pos)
+            if resolved is None:
+                self._set_drop_indicator(None)
+                event.ignore()
+                return
+            _, rect, placement, _, _ = resolved
+            self._set_drop_indicator((rect, placement))
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+            return
+
         if not self._has_droppable_payload(event):
+            self._set_drop_indicator(None)
             event.ignore()
             return
-        item = self.itemAt(event.position().toPoint())
-        if self._collection_id_for_item(item) is not None:
+        hover = self.itemAt(pos)
+        col_item = self._collection_item_for_item(hover)
+        if col_item is not None:
+            self._set_drop_indicator((self.visualItemRect(col_item), "into"))
             event.acceptProposedAction()
             return
+        self._set_drop_indicator(None)
         event.ignore()
 
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802
+        self._set_drop_indicator(None)
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
+        mime = event.mimeData()
+        pos = event.position().toPoint()
+        self._set_drop_indicator(None)
+        payload = self._parse_sidebar_drag(mime)
+        if payload is not None:
+            resolved = self._resolve_sidebar_drop(payload, pos)
+            if resolved is None:
+                event.ignore()
+                return
+            action, _rect, _placement, value, changed = resolved
+            event.setDropAction(Qt.DropAction.MoveAction)
+            event.accept()
+            if not changed:
+                return
+            if action == "reorder_roots":
+                self.rootsReordered.emit(list(value))
+            elif action == "reorder_collections":
+                self.collectionsReordered.emit(list(value))
+            elif action == "move_collection_folder":
+                cf_id, tgt_cid, tgt_idx = value
+                self.collectionFolderMoved.emit(int(cf_id), int(tgt_cid), int(tgt_idx))
+            return
+
         if not self._has_droppable_payload(event):
             event.ignore()
             return
-        coll_id = self._collection_id_for_item(self.itemAt(event.position().toPoint()))
+        coll_id = self._collection_id_for_item(self.itemAt(pos))
         if coll_id is None:
             event.ignore()
             return
-        mime = event.mimeData()
         if mime.hasFormat(FILE_IDS_MIME):
             try:
                 raw = bytes(mime.data(FILE_IDS_MIME)).decode("utf-8")
@@ -1292,6 +1619,34 @@ class FolderTree(QTreeWidget):
             if paths:
                 self.urlsDroppedOnCollection.emit(coll_id, paths)
                 event.acceptProposedAction()
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
+        super().paintEvent(event)
+        if self._drop_indicator is None:
+            return
+        rect, placement = self._drop_indicator
+        if not rect.isValid():
+            return
+        painter = QPainter(self.viewport())
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            accent = QColor("#D97757")
+            if placement == "into":
+                painter.setPen(QPen(accent, 1.5))
+                painter.setBrush(QColor(217, 119, 87, 32))
+                painter.drawRoundedRect(QRectF(rect.adjusted(2, 1, -4, -1)), 6.0, 6.0)
+            else:
+                y = float(rect.top()) if placement == "above" else float(rect.bottom())
+                y = max(1.0, min(float(self.viewport().height() - 2), y))
+                x0 = float(max(2, rect.left() + 2))
+                x1 = float(max(x0 + 12, self.viewport().width() - 6))
+                painter.setPen(QPen(accent, 2.0))
+                painter.drawLine(QPointF(x0, y), QPointF(x1, y))
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(accent)
+                painter.drawEllipse(QPointF(x0, y), 3.0, 3.0)
+        finally:
+            painter.end()
 
     def _add_collection_menu_helpers(self, menu: QMenu) -> None:
         new_act = QAction("+ 新建合集分组…", menu)

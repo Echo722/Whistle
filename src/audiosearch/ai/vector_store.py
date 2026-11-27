@@ -20,13 +20,14 @@ _CUDA_TORCH_CACHE: tuple[bool, Any | None] | None = None
 
 
 def _try_cuda_torch() -> Any | None:
-    """Return the imported torch module when CUDA is available, else None."""
+    """Return the imported torch module when CUDA is actually usable, else None."""
     global _CUDA_TORCH_CACHE
     if _CUDA_TORCH_CACHE is None:
         try:
-            import torch
+            from audiosearch.inference.runtime import probe_cuda, require_torch
 
-            mod = torch if torch.cuda.is_available() else None
+            ok, _reason = probe_cuda()
+            mod = require_torch() if ok else None
         except Exception:
             mod = None
         _CUDA_TORCH_CACHE = (True, mod)

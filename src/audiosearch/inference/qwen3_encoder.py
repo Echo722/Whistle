@@ -158,20 +158,40 @@ class Qwen3TextEncoder:
         out_dim = self.space.dimension
         outputs: list[np.ndarray] = []
 
+        def _is_oom(exc: BaseException) -> bool:
+            cuda_mod = getattr(torch, "cuda", None)
+            oom_cls = getattr(cuda_mod, "OutOfMemoryError", None) if cuda_mod is not None else None
+            if oom_cls is not None and isinstance(exc, oom_cls):
+                return True
+            return "out of memory" in str(exc).lower()
+
+        def _encode_chunk(sub_chunk: list[str]) -> list[np.ndarray]:
+            try:
+                encoded = self._tokenizer(
+                    sub_chunk,
+                    padding=True,
+                    truncation=True,
+                    max_length=self.config.max_tokens,
+                    return_tensors="pt",
+                ).to(device)
+                with torch.inference_mode(), self._autocast_ctx():
+                    model_out = self._model(**encoded)
+                    pooled = last_token_pool(model_out.last_hidden_state, encoded["attention_mask"])
+                    pooled = pooled[:, :out_dim]
+                return [pooled.float().cpu().numpy()]
+            except Exception as exc:  # noqa: BLE001 - halve batch and retry on OOM
+                if _is_oom(exc):
+                    cuda_mod = getattr(torch, "cuda", None)
+                    if cuda_mod is not None and cuda_mod.is_available():
+                        cuda_mod.empty_cache()
+                    if len(sub_chunk) > 1:
+                        mid = len(sub_chunk) // 2
+                        return _encode_chunk(sub_chunk[:mid]) + _encode_chunk(sub_chunk[mid:])
+                raise
+
         for start in range(0, len(texts), size):
             chunk = [str(t) if t else " " for t in texts[start : start + size]]
-            encoded = self._tokenizer(
-                chunk,
-                padding=True,
-                truncation=True,
-                max_length=self.config.max_tokens,
-                return_tensors="pt",
-            ).to(device)
-            with torch.inference_mode(), self._autocast_ctx():
-                model_out = self._model(**encoded)
-                pooled = last_token_pool(model_out.last_hidden_state, encoded["attention_mask"])
-                pooled = pooled[:, :out_dim]
-            outputs.append(pooled.float().cpu().numpy())
+            outputs.extend(_encode_chunk(chunk))
 
         return l2_normalize(np.concatenate(outputs, axis=0))
 

@@ -16,6 +16,7 @@ from audiosearch.browser.reaper_setup import find_bundled_spot_script
 from audiosearch.browser.runtime_paths import resolve_app_icon_path
 from audiosearch.browser.update_dialog import UpdateDialog
 from audiosearch.browser.updater import (
+    APP_VERSION,
     UpdateCheckResult,
     UpdateManifest,
     active_patch_info,
@@ -158,12 +159,12 @@ def test_patch_download_security_and_rollback_preserves_data(tmp_path: Path) -> 
     assert effective_version(app_root) == "0.2.1"
     assert (app_root / "app_patch" / "audiosearch" / "marker.txt").read_text() == "v3"
 
-    # Rollback v0.2.1 -> v0.2.0 -> built-in 0.1.0
+    # Rollback v0.2.1 -> v0.2.0 -> built-in APP_VERSION
     assert rollback_patch(app_root) is True
     assert effective_version(app_root) == "0.2.0"
     assert rollback_patch(app_root) is True
     assert active_patch_info(app_root) is None
-    assert effective_version(app_root) == "0.1.0"
+    assert effective_version(app_root) == APP_VERSION
 
     # data/ and models/ untouched across updates & rollbacks
     assert (app_root / "data" / "library.sqlite3").read_text(encoding="utf-8") == "KEEP_DB"
@@ -294,7 +295,7 @@ def test_patch_resource_overrides_and_main_window_version_button(tmp_path: Path,
 
     win = BrowserWindow(db_path=tmp_path / "lib.sqlite3", audition=_FakeAudition())
     try:
-        assert win.status_version.text() == "v0.1.0"
+        assert win.status_version.text() == f"v{APP_VERSION}"
         res = UpdateCheckResult(
             status="patch_available",
             current_version="0.1.0",

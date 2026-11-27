@@ -51,24 +51,57 @@ class DevicePlan:
         return self.device.startswith("cuda")
 
 
+_CUDA_PROBE_CACHE: tuple[bool, str] | None = None
+
+
+def reset_cuda_probe_cache() -> None:
+    """Clear the cached CUDA usability probe result (primarily for tests)."""
+    global _CUDA_PROBE_CACHE
+    _CUDA_PROBE_CACHE = None
+
+
+def probe_cuda(torch_mod: Any | None = None, *, force: bool = False) -> tuple[bool, str]:
+    """Verify CUDA availability and execute a minimal kernel to catch arch/driver mismatches."""
+    global _CUDA_PROBE_CACHE
+    use_cache = torch_mod is None
+    if use_cache and not force and _CUDA_PROBE_CACHE is not None:
+        return _CUDA_PROBE_CACHE
+
+    torch = torch_mod if torch_mod is not None else require_torch()
+    try:
+        available = bool(torch.cuda.is_available())
+    except Exception as exc:  # pragma: no cover - broken driver
+        result = (False, f"CUDA probe failed ({type(exc).__name__}: {exc})")
+    else:
+        if not available:
+            result = (False, "no CUDA device")
+        else:
+            try:
+                x = torch.ones((1,), dtype=torch.float32, device="cuda")
+                val = float((x + x).sum().item())
+                if val != 2.0:
+                    raise RuntimeError(f"unexpected CUDA probe result: {val}")
+                result = (True, "CUDA device available")
+            except Exception as exc:
+                result = (False, f"CUDA kernel probe failed ({type(exc).__name__}: {exc})")
+
+    if use_cache:
+        _CUDA_PROBE_CACHE = result
+    return result
+
+
 def plan_device(preference: str = "auto") -> DevicePlan:
-    """Resolve ``auto``/``cpu``/``cuda`` without pretending a GPU is present."""
+    """Resolve ``auto``/``cpu``/``cuda`` without pretending a GPU is usable."""
     if preference == "cpu":
         return DevicePlan("cpu", "float32", "explicitly requested")
-    torch = require_torch()
     if preference not in {"auto", "cuda"}:
         raise ValueError(f"unknown device preference: {preference}")
-    try:
-        available = torch.cuda.is_available()
-    except Exception as exc:  # pragma: no cover - broken driver
-        if preference == "cuda":
-            raise ModelUnavailableError(f"CUDA is unusable on this host: {exc}") from exc
-        return DevicePlan("cpu", "float32", f"CUDA probe failed ({type(exc).__name__})")
-    if available:
-        return DevicePlan("cuda", "float32", "CUDA device available")
+    ok, reason = probe_cuda()
+    if ok:
+        return DevicePlan("cuda", "float32", reason)
     if preference == "cuda":
-        raise ModelUnavailableError("CUDA was requested but no GPU is available")
-    return DevicePlan("cpu", "float32", "no CUDA device")
+        raise ModelUnavailableError(f"CUDA is unusable on this host: {reason}")
+    return DevicePlan("cpu", "float32", reason)
 
 
 @dataclass
@@ -224,7 +257,9 @@ __all__ = [
     "peak_memory",
     "peak_rss_bytes",
     "plan_device",
+    "probe_cuda",
     "release_memory",
     "require_torch",
     "require_transformers",
+    "reset_cuda_probe_cache",
 ]

@@ -610,3 +610,24 @@ def test_table_disables_row_tooltips_and_ai_limit_load_more_works(tmp_path):
         assert win.ai_load_more_btn.isVisible() is False
     finally:
         win.close()
+
+
+def test_ai_index_failed_status_is_single_line_with_full_tooltip(tmp_path):
+    create_app([])
+    db_path = tmp_path / "ai_fail_ui.sqlite3"
+    store = LibraryStore(db_path)
+    store.close()
+
+    win = BrowserWindow(db_path, audition=_FakeAudition(), ai_index=_FakeVectorIndex())
+    try:
+        full_err = "CUDA error: no kernel image is available for execution on the device\nline2\nline3"
+        win._on_ai_index_failed(full_err)
+        assert win.ai_index_btn.text() == "AI 建库"
+        assert "\n" not in win.status_ai.text()
+        assert win.status_ai.text().startswith("AI 建库失败:")
+        assert "line2" not in win.status_ai.text()
+        assert "CUDA error: no kernel image" in win.status_ai.toolTip()
+        assert "line3" in win.status_ai.toolTip()
+        assert "browser-crash.log" in win.status_ai.toolTip()
+    finally:
+        win.close()

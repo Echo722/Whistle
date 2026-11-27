@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS roots (
     file_count INTEGER NOT NULL DEFAULT 0,
     last_scan_at REAL,
     scan_cursor TEXT,
-    status TEXT NOT NULL DEFAULT 'idle'
+    status TEXT NOT NULL DEFAULT 'idle',
+    sort_order INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS folders (
@@ -272,6 +273,14 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     if "sort_order" not in cf_cols:
         conn.execute(
             "ALTER TABLE collection_folders ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"
+        )
+    root_cols = {
+        str(r["name"])
+        for r in conn.execute("PRAGMA table_info(roots)").fetchall()
+    }
+    if "sort_order" not in root_cols:
+        conn.execute(
+            "ALTER TABLE roots ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0"
         )
     if user_version < 3:
         conn.execute("PRAGMA user_version = 3")

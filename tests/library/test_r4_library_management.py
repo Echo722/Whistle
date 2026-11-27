@@ -449,3 +449,80 @@ def test_single_file_missing_inside_existing_folder(tmp_path: Path) -> None:
         assert store.query_count(root_id=root.id, include_subfolders=True) == 3
     finally:
         store.close()
+
+
+def test_sidebar_custom_sort_order_and_cross_collection_folder_move(tmp_path: Path) -> None:
+    dir_a = tmp_path / "Alpha"
+    dir_b = tmp_path / "Beta"
+    dir_c = tmp_path / "Gamma"
+    _write_pcm_wav(dir_a / "Pack1" / "a1.wav", duration_sec=0.2)
+    _write_pcm_wav(dir_a / "Pack2" / "a2.wav", duration_sec=0.2)
+    _write_pcm_wav(dir_b / "Pack3" / "b1.wav", duration_sec=0.2)
+    _write_pcm_wav(dir_c / "c1.wav", duration_sec=0.2)
+
+    db_path = tmp_path / "order.sqlite3"
+    store = LibraryStore(db_path)
+    r_a = store.add_root(dir_a)
+    r_b = store.add_root(dir_b)
+    r_c = store.add_root(dir_c)
+    store.close()
+    for rid in (r_a.id, r_b.id, r_c.id):
+        LibraryScanner(db_path).scan_root(rid)
+
+    store = LibraryStore(db_path)
+    try:
+        # Default roots sorted alphabetically
+        assert [r.label for r in store.list_roots()] == ["Alpha", "Beta", "Gamma"]
+
+        # Reorder roots & verify newly added root appends at end
+        store.reorder_roots([r_c.id, r_a.id, r_b.id])
+        assert [r.id for r in store.list_roots()] == [r_c.id, r_a.id, r_b.id]
+
+        dir_d = tmp_path / "Delta"
+        _write_pcm_wav(dir_d / "d1.wav", duration_sec=0.2)
+        r_d = store.add_root(dir_d)
+        assert [r.id for r in store.list_roots()] == [r_c.id, r_a.id, r_b.id, r_d.id]
+
+        # Reorder collections
+        c1 = store.create_collection("合集一")
+        c2 = store.create_collection("合集二")
+        c3 = store.create_collection("合集三")
+        store.reorder_collections([c3.id, c1.id, c2.id])
+        assert [c.id for c in store.list_collections()] == [c3.id, c1.id, c2.id]
+
+        # Collection folder same-collection reorder & cross-collection move
+        f_p1 = next(f for f in store.list_folders(r_a.id, None) if f.name == "Pack1")
+        f_p2 = next(f for f in store.list_folders(r_a.id, None) if f.name == "Pack2")
+        f_p3 = next(f for f in store.list_folders(r_b.id, None) if f.name == "Pack3")
+        store.add_folder_to_collection(c1.id, r_a.id, f_p1.id, f_p1.rel_path, "Pack1")
+        store.add_folder_to_collection(c1.id, r_a.id, f_p2.id, f_p2.rel_path, "Pack2")
+        store.add_folder_to_collection(c2.id, r_b.id, f_p3.id, f_p3.rel_path, "Pack3")
+
+        cfs_c1 = store.list_collection_folders(c1.id)
+        assert [cf.label for cf in cfs_c1] == ["Pack1", "Pack2"]
+        assert store.move_or_reorder_collection_folder(cfs_c1[1].id, c1.id, 0) is True
+        assert [cf.label for cf in store.list_collection_folders(c1.id)] == ["Pack2", "Pack1"]
+
+        # Move Pack2 from c1 into c2 before Pack3
+        cfs_c1 = store.list_collection_folders(c1.id)
+        assert store.move_or_reorder_collection_folder(cfs_c1[0].id, c2.id, 0) is True
+        assert [cf.label for cf in store.list_collection_folders(c1.id)] == ["Pack1"]
+        assert [cf.label for cf in store.list_collection_folders(c2.id)] == ["Pack2", "Pack3"]
+
+        # Duplicate target merge: re-add Pack1 to c2 then move c1's Pack1 into c2 -> merges cleanly without error
+        store.add_folder_to_collection(c2.id, r_a.id, f_p1.id, f_p1.rel_path, "Pack1")
+        c1_pack1 = store.list_collection_folders(c1.id)[0]
+        assert store.move_or_reorder_collection_folder(c1_pack1.id, c2.id, 0) is True
+        assert store.list_collection_folders(c1.id) == []
+        assert [cf.label for cf in store.list_collection_folders(c2.id)] == ["Pack1", "Pack2", "Pack3"]
+    finally:
+        store.close()
+
+    # Reopen store cleanly confirms persistence
+    store2 = LibraryStore(db_path)
+    try:
+        assert [r.id for r in store2.list_roots()] == [r_c.id, r_a.id, r_b.id, r_d.id]
+        assert [c.id for c in store2.list_collections()] == [c3.id, c1.id, c2.id]
+        assert [cf.label for cf in store2.list_collection_folders(c2.id)] == ["Pack1", "Pack2", "Pack3"]
+    finally:
+        store2.close()

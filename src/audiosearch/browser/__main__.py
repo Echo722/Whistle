@@ -112,6 +112,20 @@ def run_smoke_test(db_path: Path | None = None) -> tuple[int, dict[str, Any]]:
                     report["ai"]["cuda_available"] = bool(imported.cuda.is_available())
                 except Exception:
                     report["ai"]["cuda_available"] = False
+                try:
+                    from audiosearch.inference.runtime import probe_cuda
+
+                    cuda_usable, probe_reason = probe_cuda(imported, force=True)
+                    report["ai"]["cuda_usable"] = bool(cuda_usable)
+                    if not cuda_usable:
+                        report["ai"]["cuda_probe_reason"] = probe_reason
+                except Exception as exc:
+                    report["ai"]["cuda_usable"] = False
+                    report["ai"]["cuda_probe_reason"] = f"{type(exc).__name__}: {exc}"
+                try:
+                    report["ai"]["cuda_arch_list"] = list(imported.cuda.get_arch_list())
+                except Exception:
+                    report["ai"]["cuda_arch_list"] = []
             else:
                 report["ai"][mod] = True
         except Exception as exc:

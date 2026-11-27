@@ -260,16 +260,25 @@ class LibraryStore:
         display = label or Path(resolved).name or resolved
         online = 1 if Path(resolved).exists() else 0
         conn = self._conn()
-        conn.execute(
-            """
-            INSERT INTO roots(path, label, is_online, status)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(path) DO UPDATE SET
-                label = excluded.label,
-                is_online = excluded.is_online
-            """,
-            (resolved, display, online, "idle" if online else "offline"),
-        )
+        existing = conn.execute("SELECT id FROM roots WHERE path = ?", (resolved,)).fetchone()
+        if existing is None:
+            max_row = conn.execute("SELECT COALESCE(MAX(sort_order), 0) FROM roots").fetchone()
+            max_ord = 0 if max_row is None else int(max_row[0])
+            next_ord = (max_ord + 1) if max_ord > 0 else 0
+            conn.execute(
+                """
+                INSERT INTO roots(path, label, is_online, status, sort_order)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (resolved, display, online, "idle" if online else "offline", next_ord),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE roots SET label = ?, is_online = ? WHERE id = ?
+                """,
+                (display, online, int(existing["id"])),
+            )
         conn.commit()
         self.bump_index_version()
         row = conn.execute("SELECT * FROM roots WHERE path = ?", (resolved,)).fetchone()
@@ -283,8 +292,39 @@ class LibraryStore:
         self.bump_index_version()
 
     def list_roots(self) -> list[RootRecord]:
-        rows = self._conn().execute("SELECT * FROM roots ORDER BY label COLLATE NOCASE, id").fetchall()
+        rows = (
+            self._conn()
+            .execute(
+                "SELECT * FROM roots "
+                "ORDER BY CASE WHEN sort_order > 0 THEN 0 ELSE 1 END, "
+                "sort_order ASC, label COLLATE NOCASE, id ASC"
+            )
+            .fetchall()
+        )
         return [_row_to_root(r) for r in rows]
+
+    def reorder_roots(self, ordered_root_ids: list[int]) -> None:
+        current_ids = [r.id for r in self.list_roots()]
+        valid = set(current_ids)
+        merged: list[int] = []
+        seen: set[int] = set()
+        for rid in ordered_root_ids:
+            rid_int = int(rid)
+            if rid_int in valid and rid_int not in seen:
+                seen.add(rid_int)
+                merged.append(rid_int)
+        for rid_int in current_ids:
+            if rid_int not in seen:
+                seen.add(rid_int)
+                merged.append(rid_int)
+        if not merged:
+            return
+        conn = self._conn()
+        with conn:
+            conn.executemany(
+                "UPDATE roots SET sort_order = ? WHERE id = ?",
+                [(pos, rid_int) for pos, rid_int in enumerate(merged, start=1)],
+            )
 
     def get_root(self, root_id: int) -> RootRecord | None:
         row = self._conn().execute("SELECT * FROM roots WHERE id = ?", (root_id,)).fetchone()
@@ -2285,6 +2325,29 @@ class LibraryStore:
         with conn:
             conn.execute("UPDATE collections SET name = ? WHERE id = ?", (clean, int(collection_id)))
 
+    def reorder_collections(self, ordered_collection_ids: list[int]) -> None:
+        current_ids = [c.id for c in self.list_collections()]
+        valid = set(current_ids)
+        merged: list[int] = []
+        seen: set[int] = set()
+        for cid in ordered_collection_ids:
+            cid_int = int(cid)
+            if cid_int in valid and cid_int not in seen:
+                seen.add(cid_int)
+                merged.append(cid_int)
+        for cid_int in current_ids:
+            if cid_int not in seen:
+                seen.add(cid_int)
+                merged.append(cid_int)
+        if not merged:
+            return
+        conn = self._conn()
+        with conn:
+            conn.executemany(
+                "UPDATE collections SET sort_order = ? WHERE id = ?",
+                [(pos, cid_int) for pos, cid_int in enumerate(merged, start=1)],
+            )
+
     def delete_collection(self, collection_id: int) -> None:
         conn = self._conn()
         with conn:
@@ -2399,6 +2462,75 @@ class LibraryStore:
         with conn:
             conn.execute("DELETE FROM collection_folders WHERE id = ?", (int(entry_id),))
         self.bump_index_version()
+
+    def move_or_reorder_collection_folder(
+        self, entry_id: int, target_collection_id: int, target_index: int
+    ) -> bool:
+        """Reorder a folder within a collection or move it cleanly into another collection."""
+        conn = self._conn()
+        src = conn.execute(
+            "SELECT id, collection_id, root_id, folder_rel_path FROM collection_folders WHERE id = ?",
+            (int(entry_id),),
+        ).fetchone()
+        if src is None:
+            return False
+        tgt_exists = conn.execute(
+            "SELECT id FROM collections WHERE id = ?", (int(target_collection_id),)
+        ).fetchone()
+        if tgt_exists is None:
+            return False
+
+        src_id = int(src["id"])
+        src_coll_id = int(src["collection_id"])
+        tgt_coll_id = int(target_collection_id)
+        root_id = int(src["root_id"])
+        rel_path = str(src["folder_rel_path"] or "")
+
+        target_ids = [cf.id for cf in self.list_collection_folders(tgt_coll_id)]
+        if src_coll_id == tgt_coll_id:
+            target_ids = [x for x in target_ids if x != src_id]
+            idx = max(0, min(int(target_index), len(target_ids)))
+            target_ids.insert(idx, src_id)
+            with conn:
+                conn.executemany(
+                    "UPDATE collection_folders SET sort_order = ? WHERE id = ?",
+                    [(pos, cf_id) for pos, cf_id in enumerate(target_ids, start=1)],
+                )
+            return True
+
+        dup_row = conn.execute(
+            "SELECT id FROM collection_folders "
+            "WHERE collection_id = ? AND root_id = ? AND folder_rel_path = ?",
+            (tgt_coll_id, root_id, rel_path),
+        ).fetchone()
+        src_remaining = [
+            cf.id for cf in self.list_collection_folders(src_coll_id) if cf.id != src_id
+        ]
+        with conn:
+            if dup_row is not None:
+                keep_id = int(dup_row["id"])
+                conn.execute("DELETE FROM collection_folders WHERE id = ?", (src_id,))
+                target_ids = [x for x in target_ids if x != keep_id]
+                idx = max(0, min(int(target_index), len(target_ids)))
+                target_ids.insert(idx, keep_id)
+            else:
+                conn.execute(
+                    "UPDATE collection_folders SET collection_id = ? WHERE id = ?",
+                    (tgt_coll_id, src_id),
+                )
+                idx = max(0, min(int(target_index), len(target_ids)))
+                target_ids.insert(idx, src_id)
+            conn.executemany(
+                "UPDATE collection_folders SET sort_order = ? WHERE id = ?",
+                [(pos, cf_id) for pos, cf_id in enumerate(target_ids, start=1)],
+            )
+            if src_remaining:
+                conn.executemany(
+                    "UPDATE collection_folders SET sort_order = ? WHERE id = ?",
+                    [(pos, cf_id) for pos, cf_id in enumerate(src_remaining, start=1)],
+                )
+        self.bump_index_version()
+        return True
 
     def add_files_to_collection(self, collection_id: int, file_ids: list[int]) -> int:
         ids = list(dict.fromkeys(int(fid) for fid in file_ids))
