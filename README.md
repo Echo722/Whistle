@@ -67,11 +67,8 @@ uv run --locked --group playback --group ai audiosearch index --db .local/librar
 
 便携版支持从 GitHub Releases 拉取 `< 1 MB` 的代码补丁包并原地重启升级（不覆盖 `data/` 与 `models/`）：
 
-```powershell
-.\packaging\build_patch.ps1
-```
-
-默认产出 `.local\dist\patches\whistle-patch-vX.Y.Z.zip` 与 `.local\dist\patches\latest.json`，随对应 tag 上传到 GitHub Releases 即可推送在线更新。
+- **GitHub Actions 自动发版**：推送 `v*` 标签（或在 Actions 页面手动触发 `Release Patch`）时，[.github/workflows/release-patch.yml](./.github/workflows/release-patch.yml) 会在云端直接调用 `packaging/build_patch.py` 构建并发布 `whistle-patch-vX.Y.Z.zip` 与 `latest.json` 到对应 GitHub Release。
+- **本地手动构建**：执行 `python packaging/build_patch.py --version X.Y.Z` 或 `.\packaging\build_patch.ps1 -Version X.Y.Z`，默认产出 `.local\dist\patches\whistle-patch-vX.Y.Z.zip` 与 `.local\dist\patches\latest.json`。
 
 ## 检查与测试
 

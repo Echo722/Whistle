@@ -1,0 +1,102 @@
+name: Release Patch
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build and publish (e.g. v0.1.0)'
+        required: true
+        default: 'v0.1.0'
+        type: string
+      notes:
+        description: 'Optional release notes'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish-patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build patch zip and latest.json
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            RAW_TAG="${INPUT_TAG:-v0.1.0}"
+          else
+            RAW_TAG="${GITHUB_REF_NAME}"
+          fi
+          RAW_TAG="${RAW_TAG#refs/tags/}"
+          if [[ "${RAW_TAG}" != v* && "${RAW_TAG}" != V* ]]; then
+            RELEASE_TAG="v${RAW_TAG}"
+          else
+            RELEASE_TAG="v${RAW_TAG#?}"
+          fi
+          VERSION="${RELEASE_TAG#v}"
+
+          NOTES="${INPUT_NOTES}"
+          if [ -z "${NOTES}" ]; then
+            NOTES="$(git tag -l --format='%(contents)' "${RELEASE_TAG}" | sed '/^$/d' || true)"
+          fi
+          if [ -z "${NOTES}" ]; then
+            NOTES="$(git log -1 --pretty=%s)"
+          fi
+
+          python packaging/build_patch.py \
+            --version "${VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --notes "${NOTES}" \
+            --out-dir dist-patch
+
+          ZIP_FILE="dist-patch/whistle-patch-v${VERSION}.zip"
+          LATEST_FILE="dist-patch/latest.json"
+          test -f "${ZIP_FILE}"
+          test -f "${LATEST_FILE}"
+          python -c "import json; json.load(open('${LATEST_FILE}', encoding='utf-8'))"
+
+          {
+            echo "RELEASE_TAG=${RELEASE_TAG}"
+            echo "VERSION=${VERSION}"
+            echo "ZIP_FILE=${ZIP_FILE}"
+            echo "LATEST_FILE=${LATEST_FILE}"
+          } >> "${GITHUB_ENV}"
+
+          {
+            echo "NOTES<<EOF_WHISTLE_NOTES"
+            printf '%s\n' "${NOTES}"
+            echo "EOF_WHISTLE_NOTES"
+          } >> "${GITHUB_ENV}"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" "${ZIP_FILE}" "${LATEST_FILE}" --clobber
+            gh release edit "${RELEASE_TAG}" --title "Whistle ${RELEASE_TAG}" --notes "${NOTES}" --latest
+          else
+            gh release create "${RELEASE_TAG}" "${ZIP_FILE}" "${LATEST_FILE}" \
+              --title "Whistle ${RELEASE_TAG}" \
+              --notes "${NOTES}" \
+              --latest
+          fi

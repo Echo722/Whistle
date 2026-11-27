@@ -307,3 +307,56 @@ def test_patch_resource_overrides_and_main_window_version_button(tmp_path: Path,
         assert win.status_version.property("statusState") == "ok"
     finally:
         win.close()
+
+
+def test_build_patch_py_output_passes_updater_check_and_apply(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    script_path = repo_root / "packaging" / "build_patch.py"
+    out_dir = tmp_path / "patches"
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(script_path),
+            "--version",
+            "v0.2.0",
+            "--notes",
+            "CI patch test",
+            "--out-dir",
+            str(out_dir),
+        ],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+
+    patch_zip = out_dir / "whistle-patch-v0.2.0.zip"
+    latest_json = out_dir / "latest.json"
+    assert patch_zip.is_file()
+    assert latest_json.is_file()
+
+    payload = json.loads(latest_json.read_text(encoding="utf-8"))
+    raw = patch_zip.read_bytes()
+    assert payload["version"] == "0.2.0"
+    assert payload["min_runtime_abi"] >= 1
+    assert payload["patch_sha256"] == hashlib.sha256(raw).hexdigest().lower()
+    assert payload["patch_size"] == len(raw)
+    assert payload["notes"] == "CI patch test"
+
+    local_payload = dict(payload)
+    local_payload["patch_url"] = patch_zip.as_uri()
+    local_manifest = tmp_path / "local-latest.json"
+    local_manifest.write_text(json.dumps(local_payload), encoding="utf-8")
+
+    check_res = check_for_updates(manifest_url=local_manifest.as_uri(), current_version="0.1.0")
+    assert check_res.status == "patch_available"
+    assert check_res.manifest is not None
+
+    app_root = tmp_path / "WhistleApp"
+    app_root.mkdir(parents=True)
+    install_res = download_and_stage_patch(check_res.manifest, app_root=app_root)
+    assert effective_version(app_root) == "0.2.0"
+    assert (install_res.patch_dir / "audiosearch" / "__init__.py").is_file()
+    assert (install_res.patch_dir / "reaper" / "audiosearch_spot_bridge.lua").is_file()
