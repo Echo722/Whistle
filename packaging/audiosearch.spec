@@ -21,7 +21,7 @@ hiddenimports: list[str] = [
     *collect_submodules("mutagen"),
 ]
 
-for pkg in ("_sounddevice_data", "_soundfile_data", "pedalboard"):
+for pkg in ("_sounddevice_data", "_soundfile_data", "pedalboard", "av"):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b

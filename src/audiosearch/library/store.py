@@ -1053,7 +1053,15 @@ class LibraryStore:
                 where_parts.append("f.is_available = 1 AND r.is_online = 1")
             if filters.ext:
                 ext_norm = filters.ext.strip().lower().lstrip(".")
-                if ext_norm == "aif":
+                if ext_norm == "__audio__":
+                    where_parts.append(
+                        "LOWER(f.ext) NOT IN ('mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v')"
+                    )
+                elif ext_norm == "__video__":
+                    where_parts.append(
+                        "LOWER(f.ext) IN ('mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v')"
+                    )
+                elif ext_norm == "aif":
                     where_parts.append("LOWER(f.ext) IN ('aif', 'aiff')")
                 elif ext_norm:
                     where_parts.append("LOWER(f.ext) = ?")
@@ -1131,7 +1139,15 @@ class LibraryStore:
                 where_parts.append("f.is_available = 1 AND r.is_online = 1")
             if filters.ext:
                 ext_norm = filters.ext.strip().lower().lstrip(".")
-                if ext_norm == "aif":
+                if ext_norm == "__audio__":
+                    where_parts.append(
+                        "LOWER(f.ext) NOT IN ('mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v')"
+                    )
+                elif ext_norm == "__video__":
+                    where_parts.append(
+                        "LOWER(f.ext) IN ('mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v')"
+                    )
+                elif ext_norm == "aif":
                     where_parts.append("LOWER(f.ext) IN ('aif', 'aiff')")
                 elif ext_norm:
                     where_parts.append("LOWER(f.ext) = ?")

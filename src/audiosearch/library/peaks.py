@@ -14,8 +14,9 @@ from pathlib import Path
 
 import numpy as np
 
-from audiosearch.audioio.decode import open_wav
+from audiosearch.audioio.decode import open_audio_file, open_wav
 from audiosearch.audioio.errors import UnsupportedFormatError
+from audiosearch.audioio.video import is_video_path
 
 _HEADER_FMT = "<dddIII"
 _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
@@ -599,8 +600,7 @@ def compute_file_peaks(
             result = None
 
     if result is None:
-        sf = _load_soundfile()
-        with sf.SoundFile(str(file_path)) as handle:
+        with open_audio_file(file_path) as handle:
             total_frames = int(handle.frames)
             sample_rate = int(handle.samplerate)
             channels = max(int(handle.channels), 1)
@@ -1016,51 +1016,53 @@ def compute_thumbnail_with_spectral(
         except UnsupportedFormatError:
             pass
 
-    sf = _load_soundfile()
-    with sf.SoundFile(str(file_path)) as handle:
-        total_frames = int(handle.frames)
-        sample_rate = int(handle.samplerate)
-        if total_frames <= 0 or sample_rate <= 0:
-            return b"", b""
-        buckets = min(points, total_frames)
-        duration = total_frames / sample_rate
-        if duration > LARGE_COMPRESSED_SECONDS and handle.seekable():
-            amps = np.zeros(buckets, dtype=np.float32)
-            n_fft = min(512, spectral_fft_size(sample_rate))
-            windows = np.zeros((buckets, n_fft), dtype=np.float32)
-            try:
-                for bucket in range(buckets):
-                    f0 = (bucket * total_frames) // buckets
-                    f1 = ((bucket + 1) * total_frames) // buckets
-                    span = max(1, f1 - f0)
-                    take = min(1024, span)
-                    start = f0 + max(0, (span - take) // 2)
-                    handle.seek(start)
-                    block = handle.read(frames=take, dtype="float32", always_2d=True)
-                    if block.shape[0] > 0:
-                        amps[bucket] = float(np.max(np.abs(block)))
-                        windows[bucket] = _slice_mono_fft_window(block, n_fft)
-                spectral = analyze_spectral_frames(windows, sample_rate)
-                return encode_thumbnail_amplitudes(amps), spectral.tobytes()
-            except Exception:
-                handle.seek(0)
+    try:
+        with open_audio_file(file_path) as handle:
+            total_frames = int(handle.frames)
+            sample_rate = int(handle.samplerate)
+            if total_frames <= 0 or sample_rate <= 0:
+                return b"", b""
+            buckets = min(points, total_frames)
+            duration = total_frames / sample_rate
+            if (not is_video_path(file_path)) and duration > LARGE_COMPRESSED_SECONDS and handle.seekable():
+                amps = np.zeros(buckets, dtype=np.float32)
+                n_fft = min(512, spectral_fft_size(sample_rate))
+                windows = np.zeros((buckets, n_fft), dtype=np.float32)
+                try:
+                    for bucket in range(buckets):
+                        f0 = (bucket * total_frames) // buckets
+                        f1 = ((bucket + 1) * total_frames) // buckets
+                        span = max(1, f1 - f0)
+                        take = min(1024, span)
+                        start = f0 + max(0, (span - take) // 2)
+                        handle.seek(start)
+                        block = handle.read(frames=take, dtype="float32", always_2d=True)
+                        if block.shape[0] > 0:
+                            amps[bucket] = float(np.max(np.abs(block)))
+                            windows[bucket] = _slice_mono_fft_window(block, n_fft)
+                    spectral = analyze_spectral_frames(windows, sample_rate)
+                    return encode_thumbnail_amplitudes(amps), spectral.tobytes()
+                except Exception:
+                    handle.seek(0)
 
-        def _sf_chunks() -> Iterator[np.ndarray]:
-            remaining = total_frames
-            while remaining > 0:
-                to_read = min(65536, remaining)
-                block = handle.read(frames=to_read, dtype="float32", always_2d=True)
-                if block.shape[0] == 0:
-                    break
-                remaining -= int(block.shape[0])
-                yield block
+            def _sf_chunks() -> Iterator[np.ndarray]:
+                remaining = total_frames
+                while remaining > 0:
+                    to_read = min(65536, remaining)
+                    block = handle.read(frames=to_read, dtype="float32", always_2d=True)
+                    if block.shape[0] == 0:
+                        break
+                    remaining -= int(block.shape[0])
+                    yield block
 
-        return _compute_mono_thumb_and_spectral_from_chunks(
-            _sf_chunks(),
-            total_frames=total_frames,
-            sample_rate=sample_rate,
-            buckets=buckets,
-        )
+            return _compute_mono_thumb_and_spectral_from_chunks(
+                _sf_chunks(),
+                total_frames=total_frames,
+                sample_rate=sample_rate,
+                buckets=buckets,
+            )
+    except UnsupportedFormatError:
+        return b"", b""
 
 
 def compute_thumbnail_peaks(
@@ -1107,41 +1109,43 @@ def compute_thumbnail_peaks(
         except UnsupportedFormatError:
             pass
 
-    sf = _load_soundfile()
-    with sf.SoundFile(str(file_path)) as handle:
-        total_frames = int(handle.frames)
-        sample_rate = int(handle.samplerate)
-        if total_frames <= 0 or sample_rate <= 0:
-            return b""
-        buckets = min(points, total_frames)
-        duration = total_frames / sample_rate
-        amps = np.zeros(buckets, dtype=np.float32)
-        used_stride = False
-        if duration > LARGE_COMPRESSED_SECONDS and handle.seekable():
-            try:
-                for bucket in range(buckets):
-                    f0 = (bucket * total_frames) // buckets
-                    f1 = ((bucket + 1) * total_frames) // buckets
-                    span = max(1, f1 - f0)
-                    take = min(1024, span)
-                    start = f0 + max(0, (span - take) // 2)
-                    handle.seek(start)
-                    block = handle.read(frames=take, dtype="float32", always_2d=True)
-                    if block.shape[0] > 0:
-                        amps[bucket] = float(np.max(np.abs(block)))
-                used_stride = True
-            except Exception:
-                amps.fill(0.0)
-                handle.seek(0)
-        if not used_stride:
-            chunk_frames = 65536
-            frame_offset = 0
-            while frame_offset < total_frames:
-                to_read = min(chunk_frames, total_frames - frame_offset)
-                block = handle.read(frames=to_read, dtype="float32", always_2d=True)
-                n = block.shape[0]
-                if n == 0:
-                    break
-                _accumulate_block_peaks(amps, block, frame_offset, total_frames, buckets)
-                frame_offset += n
-        return encode_thumbnail_amplitudes(amps)
+    try:
+        with open_audio_file(file_path) as handle:
+            total_frames = int(handle.frames)
+            sample_rate = int(handle.samplerate)
+            if total_frames <= 0 or sample_rate <= 0:
+                return b""
+            buckets = min(points, total_frames)
+            duration = total_frames / sample_rate
+            amps = np.zeros(buckets, dtype=np.float32)
+            used_stride = False
+            if (not is_video_path(file_path)) and duration > LARGE_COMPRESSED_SECONDS and handle.seekable():
+                try:
+                    for bucket in range(buckets):
+                        f0 = (bucket * total_frames) // buckets
+                        f1 = ((bucket + 1) * total_frames) // buckets
+                        span = max(1, f1 - f0)
+                        take = min(1024, span)
+                        start = f0 + max(0, (span - take) // 2)
+                        handle.seek(start)
+                        block = handle.read(frames=take, dtype="float32", always_2d=True)
+                        if block.shape[0] > 0:
+                            amps[bucket] = float(np.max(np.abs(block)))
+                    used_stride = True
+                except Exception:
+                    amps.fill(0.0)
+                    handle.seek(0)
+            if not used_stride:
+                chunk_frames = 65536
+                frame_offset = 0
+                while frame_offset < total_frames:
+                    to_read = min(chunk_frames, total_frames - frame_offset)
+                    block = handle.read(frames=to_read, dtype="float32", always_2d=True)
+                    n = block.shape[0]
+                    if n == 0:
+                        break
+                    _accumulate_block_peaks(amps, block, frame_offset, total_frames, buckets)
+                    frame_offset += n
+            return encode_thumbnail_amplitudes(amps)
+    except UnsupportedFormatError:
+        return b""

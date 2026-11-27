@@ -44,6 +44,7 @@ class BrowserSettings:
     sidebar_splitter_sizes: list[int] = field(default_factory=lambda: [210, 330])
     ui_scale: str = "standard"
     output_device_name: str = ""
+    index_video_files: bool = True
 
 
 def settings_path_for_db(db_path: Path) -> Path:
@@ -132,6 +133,9 @@ def load_settings(path: Path) -> BrowserSettings:
             ),
             ui_scale=normalize_ui_scale(raw.get("ui_scale", defaults.ui_scale)),
             output_device_name=str(raw.get("output_device_name", "") or "").strip(),
+            index_video_files=bool(
+                raw.get("index_video_files", defaults.index_video_files)
+            ),
         )
     except Exception:
         return BrowserSettings()

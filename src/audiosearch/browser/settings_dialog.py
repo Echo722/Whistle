@@ -275,14 +275,18 @@ class SettingsDialog(QDialog):
 
         self.exclude_same_pkg_cb = QCheckBox("AI 找同类默认排除同目录 / 同素材包")
         self.global_scope_cb = QCheckBox("默认使用全库范围搜索（而非仅当前目录）")
+        self.index_video_cb = QCheckBox("扫描目录时索引视频文件（MP4 / MOV / MKV / WebM / AVI）")
+        self.index_video_cb.setToolTip("默认开启；更改后在下次扫描或右键根目录「重新扫描」时生效")
         self.exclude_same_pkg_cb.toggled.connect(
             lambda checked: self._sync_toggle(self._window.exclude_same_pkg_btn, checked)
         )
         self.global_scope_cb.toggled.connect(
             lambda checked: self._sync_toggle(self._window.scope_btn, checked)
         )
+        self.index_video_cb.toggled.connect(self._on_index_video_toggled)
         search_box.addWidget(self.exclude_same_pkg_cb)
         search_box.addWidget(self.global_scope_cb)
+        search_box.addWidget(self.index_video_cb)
         layout.addWidget(search_card)
 
         int_card, int_box = self._make_card("REAPER 桥接与快捷键")
@@ -344,6 +348,9 @@ class SettingsDialog(QDialog):
                 self.ai_limit_combo.setCurrentIndex(limit_idx)
             self.exclude_same_pkg_cb.setChecked(self._window.exclude_same_pkg_btn.isChecked())
             self.global_scope_cb.setChecked(self._window.scope_btn.isChecked())
+            self.index_video_cb.setChecked(
+                bool(getattr(self._window, "_index_video_files", True))
+            )
 
             self._populate_output_devices()
             self._refresh_reaper_label()
@@ -446,10 +453,21 @@ class SettingsDialog(QDialog):
         self._window._open_reaper_setup_dialog()
         self._refresh_reaper_label()
 
+    @Slot(bool)
+    def _on_index_video_toggled(self, checked: bool) -> None:
+        if self._syncing:
+            return
+        setter = getattr(self._window, "set_index_video_files", None)
+        if callable(setter):
+            setter(bool(checked))
+
     @Slot()
     def _on_reset_defaults(self) -> None:
         self._window.apply_ui_scale(theme.DEFAULT_UI_SCALE)
         self._window.set_output_device("", refresh_portaudio=False)
+        setter = getattr(self._window, "set_index_video_files", None)
+        if callable(setter):
+            setter(True)
         self._sync_from_window()
 
 

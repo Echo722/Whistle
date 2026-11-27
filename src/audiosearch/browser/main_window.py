@@ -60,6 +60,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from audiosearch.audioio.video import is_video_path
 from audiosearch.audition.render import RENDER_DIR_NAME, prune_render_dir, render_range
 from audiosearch.browser.audition_controller import AuditionController
 from audiosearch.browser.collections_tree import (
@@ -667,6 +668,7 @@ class BrowserWindow(QMainWindow):
         self._settings = load_settings(self._settings_path)
         self._ui_scale = normalize_ui_scale(self._settings.ui_scale)
         self._output_device_name = str(self._settings.output_device_name or "").strip()
+        self._index_video_files = bool(self._settings.index_video_files)
         if app_inst is not None:
             apply_theme(app_inst, self._ui_scale)
         self._settings_ready = False
@@ -782,6 +784,16 @@ class BrowserWindow(QMainWindow):
         self._save_settings_timer.setSingleShot(True)
         self._save_settings_timer.setInterval(400)
         self._save_settings_timer.timeout.connect(self._flush_saved_settings)
+
+        self._silent_video_state: str = "empty"
+        self._silent_video_pos: float = 0.0
+        self._silent_video_anchor_mono: float = 0.0
+        self._silent_video_anchor_pos: float = 0.0
+        self._silent_video_start: float = 0.0
+        self._silent_video_end: float | None = None
+        self._silent_video_timer = QTimer(self)
+        self._silent_video_timer.setInterval(33)
+        self._silent_video_timer.timeout.connect(self._tick_silent_video)
 
         self._build_ui()
         self._apply_saved_settings(self._settings)
@@ -984,11 +996,16 @@ class BrowserWindow(QMainWindow):
         self.filter_ext_combo = QComboBox()
         for label, val in (
             ("全部格式", ""),
+            ("仅音频", "__audio__"),
+            ("仅视频", "__video__"),
             ("WAV", "wav"),
             ("OGG", "ogg"),
             ("MP3", "mp3"),
             ("FLAC", "flac"),
             ("AIF", "aif"),
+            ("MP4", "mp4"),
+            ("MOV", "mov"),
+            ("MKV", "mkv"),
         ):
             self.filter_ext_combo.addItem(label, val)
 
@@ -1380,6 +1397,7 @@ class BrowserWindow(QMainWindow):
         self._apply_col_layout("keyword", snapshot_previous=False)
         self.exclude_same_pkg_btn.setChecked(s.exclude_same_package_similar)
         self.apply_ui_scale(s.ui_scale, persist=False)
+        self._index_video_files = bool(s.index_video_files)
 
     @staticmethod
     def _merge_column_order(saved_order_raw: list[str]) -> list[str]:
@@ -1606,6 +1624,7 @@ class BrowserWindow(QMainWindow):
             sidebar_splitter_sizes=self._settings.sidebar_splitter_sizes,
             ui_scale=self._ui_scale,
             output_device_name=self._output_device_name,
+            index_video_files=self._index_video_files,
         )
 
     def _wire_signals(self) -> None:
@@ -1621,7 +1640,7 @@ class BrowserWindow(QMainWindow):
         self.scan_pause_btn.clicked.connect(self._toggle_scan_pause)
 
         self.play_btn.clicked.connect(self._on_play_button)
-        self.stop_btn.clicked.connect(self.audition.stop)
+        self.stop_btn.clicked.connect(self._on_stop_clicked)
         self.loop_btn.toggled.connect(self.audition.set_loop)
         self.volume_knob.valueChanged.connect(self._apply_volume_db)
         self.pitch_knob.valueChanged.connect(self._on_pitch_rate_changed)
@@ -1733,6 +1752,7 @@ class BrowserWindow(QMainWindow):
         self.inspector.statusMessageRequested.connect(
             lambda msg: self.statusBar().showMessage(msg, 6000)
         )
+        self.inspector.togglePlayRequested.connect(self._on_play_button)
 
         self.waveform.seekRequested.connect(self._on_waveform_seek)
         self.waveform.selectionChanged.connect(self._on_selection_changed)
@@ -1806,7 +1826,7 @@ class BrowserWindow(QMainWindow):
             if self._selection is not None:
                 self._clear_selection()
             else:
-                self.audition.stop()
+                self._stop_playback()
             return True
 
         if key == Qt.Key.Key_Space and not in_text_input:
@@ -2289,6 +2309,113 @@ class BrowserWindow(QMainWindow):
             self.status_audio.setText(f"拖出烘焙失败: {exc}")
             return rec.full_path
 
+    @staticmethod
+    def _is_silent_video(rec: FileRecord | None) -> bool:
+        return rec is not None and is_video_path(rec.full_path) and rec.sample_rate <= 0
+
+    @Slot()
+    def _on_stop_clicked(self) -> None:
+        self._stop_playback()
+
+    def _stop_playback(self) -> None:
+        self.audition.stop()
+        self._stop_silent_video(reset_pos=True)
+
+    def _start_silent_video(
+        self,
+        rec: FileRecord,
+        start_seconds: float = 0.0,
+        *,
+        end_seconds: float | None = None,
+    ) -> None:
+        self.audition.stop()
+        self._silent_video_timer.stop()
+        dur = max(0.0, float(rec.duration_sec))
+        start = max(0.0, min(float(start_seconds), max(0.0, dur - 0.02))) if dur > 0.0 else 0.0
+        end = None if end_seconds is None else max(start + 0.02, min(float(end_seconds), dur))
+        self._silent_video_start = start
+        self._silent_video_end = end
+        self._silent_video_pos = start
+        self._silent_video_anchor_pos = start
+        self._silent_video_anchor_mono = time.monotonic()
+        self._silent_video_state = "playing"
+        self.table_model.set_playing_file(rec.id)
+        ratio = max(0.0, min(1.0, start / dur)) if dur > 0.0 else 0.0
+        self.table_view.set_playing_progress(rec.id, ratio)
+        self.waveform.set_playback_head(start)
+        self._update_transport_time(start)
+        self._update_play_btn_visual(True)
+        self.inspector.set_video_playing(True)
+        self.inspector.sync_video_time(start)
+        self._silent_video_timer.start()
+
+    def _pause_silent_video(self) -> None:
+        if self._silent_video_state != "playing":
+            return
+        self._silent_video_timer.stop()
+        rate = max(0.25, float(self.rate_knob.value()))
+        elapsed = max(0.0, time.monotonic() - self._silent_video_anchor_mono) * rate
+        self._silent_video_pos = self._silent_video_anchor_pos + elapsed
+        self._silent_video_state = "paused"
+        self.table_model.set_playing_file(None)
+        self._update_play_btn_visual(False)
+        self.inspector.set_video_playing(False)
+
+    def _resume_silent_video(self) -> None:
+        rec = self._current_file
+        if not self._is_silent_video(rec) or self._silent_video_state != "paused":
+            return
+        assert rec is not None
+        self._silent_video_anchor_pos = self._silent_video_pos
+        self._silent_video_anchor_mono = time.monotonic()
+        self._silent_video_state = "playing"
+        self.table_model.set_playing_file(rec.id)
+        self._update_play_btn_visual(True)
+        self.inspector.set_video_playing(True)
+        self._silent_video_timer.start()
+
+    def _stop_silent_video(self, *, reset_pos: bool = True, clear_state: bool = False) -> None:
+        was_active = self._silent_video_state != "empty" or self._silent_video_timer.isActive()
+        self._silent_video_timer.stop()
+        self._silent_video_state = "empty" if clear_state else "paused"
+        if reset_pos:
+            self._silent_video_pos = 0.0
+        if was_active:
+            self.waveform.set_playback_head(None)
+            self.table_model.set_playing_file(None)
+            self.table_view.set_playing_progress(None, None)
+            self._update_transport_time(self._silent_video_pos)
+            self._update_play_btn_visual(False)
+            self.inspector.set_video_playing(False)
+            if reset_pos and not clear_state and self._current_file is not None and is_video_path(self._current_file.full_path):
+                self.inspector.sync_video_time(0.0)
+
+    @Slot()
+    def _tick_silent_video(self) -> None:
+        rec = self._current_file
+        if self._silent_video_state != "playing" or not self._is_silent_video(rec):
+            self._silent_video_timer.stop()
+            return
+        assert rec is not None
+        dur = max(0.0, float(rec.duration_sec))
+        bound_end = self._silent_video_end if self._silent_video_end is not None else dur
+        rate = max(0.25, float(self.rate_knob.value()))
+        pos = self._silent_video_anchor_pos + max(0.0, time.monotonic() - self._silent_video_anchor_mono) * rate
+        if bound_end > 0.0 and pos >= bound_end:
+            if self.loop_btn.isChecked():
+                pos = self._silent_video_start
+                self._silent_video_anchor_pos = pos
+                self._silent_video_anchor_mono = time.monotonic()
+            else:
+                self._stop_silent_video(reset_pos=True, clear_state=True)
+                return
+        self._silent_video_pos = pos
+        ratio = max(0.0, min(1.0, pos / dur)) if dur > 0.0 else 0.0
+        self.waveform.set_playback_head(pos)
+        self.table_view.set_playing_progress(rec.id, ratio)
+        self._update_transport_time(pos)
+        self.inspector.sync_video_time(pos)
+
     def _play_file(
         self,
         rec: FileRecord,
@@ -2296,7 +2423,11 @@ class BrowserWindow(QMainWindow):
         *,
         end_seconds: float | None = None,
     ) -> None:
-        self.audition.play_file(rec.id, rec.full_path, start_seconds, end_seconds=end_seconds)
+        if self._is_silent_video(rec):
+            self._start_silent_video(rec, start_seconds, end_seconds=end_seconds)
+        else:
+            self._stop_silent_video(reset_pos=True, clear_state=True)
+            self.audition.play_file(rec.id, rec.full_path, start_seconds, end_seconds=end_seconds)
         self.table_model.mark_played(rec.id)
         self.store.record_recent_play(rec.id)
         self.folder_tree.refresh_quick_counts()
@@ -2309,6 +2440,19 @@ class BrowserWindow(QMainWindow):
             if row >= 0:
                 rec = self.table_model.record_at(row)
         if rec is None:
+            return
+        if self._is_silent_video(rec):
+            if not rec.is_available or not rec.full_path.exists():
+                return
+            if self._silent_video_state == "playing":
+                self._pause_silent_video()
+                return
+            if self._silent_video_state == "paused" and self._silent_video_pos > 1e-4:
+                self._resume_silent_video()
+                return
+            start = self._selection[0] if self._selection is not None else self._pending_seek_sec
+            end = self._selection[1] if self._selection is not None else None
+            self._play_file(rec, start, end_seconds=end)
             return
         if self.audition.current_file_id == rec.id and self.audition.state in (
             "playing",
@@ -2327,6 +2471,7 @@ class BrowserWindow(QMainWindow):
         self._play_file(rec, start, end_seconds=end)
 
     def _prepare_file_selection(self, rec: FileRecord, *, ai_hit: Any | None = None) -> bool:
+        self._stop_silent_video(reset_pos=True, clear_state=True)
         self._current_file = rec
         self._selection = None
         self._pending_seek_sec = 0.0
@@ -2366,6 +2511,10 @@ class BrowserWindow(QMainWindow):
             self.table_view.set_playing_progress(None, None)
             self.statusBar().showMessage(f"文件离线或已移动：{rec.filename}（可右键目录重定位路径）", 4000)
             return False
+
+        if self._is_silent_video(rec):
+            self.waveform.set_loading(rec.duration_sec, "视频无音轨 · 可在右侧检查器预览画面")
+            return True
 
         self.waveform.set_loading(rec.duration_sec, "正在读取波形…")
         self._peak_gen += 1
@@ -2514,7 +2663,7 @@ class BrowserWindow(QMainWindow):
         if self.autoplay_btn.isChecked():
             self._play_file(rec, start_sec)
         else:
-            self.audition.stop()
+            self._stop_playback()
 
     @Slot(int, float)
     def _on_waveform_cell_seek(self, row: int, ratio: float) -> None:
@@ -2737,6 +2886,11 @@ class BrowserWindow(QMainWindow):
         if persist:
             self._schedule_save_settings()
         return matched, active_name
+
+    def set_index_video_files(self, enabled: bool, *, persist: bool = True) -> None:
+        self._index_video_files = bool(enabled)
+        if persist:
+            self._schedule_save_settings()
 
     @Slot()
     def _open_settings_dialog(self, initial_tab: str = "appearance") -> None:
@@ -2990,16 +3144,26 @@ class BrowserWindow(QMainWindow):
             self.waveform.set_playback_head(seconds)
             self.table_view.set_playing_progress(file_id, ratio)
             self._update_transport_time(seconds)
+            if is_video_path(self._current_file.full_path):
+                self.inspector.sync_video_time(seconds)
         elif self.audition.state == "finished":
             self.waveform.set_playback_head(None)
             self.table_view.set_playing_progress(None, None)
             self._update_transport_time(0.0)
+            if is_video_path(self._current_file.full_path):
+                self.inspector.set_video_playing(False)
+                self.inspector.sync_video_time(
+                    self._selection[0] if self._selection is not None else 0.0
+                )
         elif self.audition.state == "paused":
             if seconds > 1e-4:
                 self.table_view.set_playing_progress(file_id, ratio)
             else:
                 self.table_view.set_playing_progress(None, None)
             self._update_transport_time(seconds)
+            if is_video_path(self._current_file.full_path):
+                self.inspector.set_video_playing(False)
+                self.inspector.sync_video_time(seconds)
 
     def _update_play_btn_visual(self, playing: bool) -> None:
         is_playing = bool(playing)
@@ -3017,14 +3181,18 @@ class BrowserWindow(QMainWindow):
         if state == "playing" and self._current_file is not None:
             self.table_model.set_playing_file(self._current_file.id)
             self._update_play_btn_visual(True)
+            if is_video_path(self._current_file.full_path):
+                self.inspector.set_video_playing(True)
         elif state in ("finished", "empty"):
             self.waveform.set_playback_head(None)
             self.table_model.set_playing_file(None)
             self.table_view.set_playing_progress(None, None)
             self._update_play_btn_visual(False)
+            self.inspector.set_video_playing(False)
         elif state == "paused":
             self.table_model.set_playing_file(None)
             self._update_play_btn_visual(False)
+            self.inspector.set_video_playing(False)
         self._update_device_status()
 
     @Slot(str)
@@ -3085,7 +3253,7 @@ class BrowserWindow(QMainWindow):
         if self._scan_thread is not None and self._scan_thread.is_alive():
             self.scan_label.setText("已有扫描在进行中")
             return
-        scanner = LibraryScanner(self.store.db_path)
+        scanner = LibraryScanner(self.store.db_path, include_videos=self._index_video_files)
         self._scanner = scanner
         self._scan_started_at = time.monotonic()
         self.scan_pause_btn.setText("暂停扫描")
@@ -4286,6 +4454,7 @@ class BrowserWindow(QMainWindow):
         self._reaper_timer.stop()
         self._online_timer.stop()
         self._save_settings_timer.stop()
+        self._silent_video_timer.stop()
         self.inspector.flush_pending_note()
         self._flush_saved_settings()
         if self._scanner is not None:
@@ -4304,6 +4473,7 @@ class BrowserWindow(QMainWindow):
         self._ai_worker.shutdown(engine_to_close=engine_to_close, timeout=2.0)
         if self._ai_owns_index and self._ai_index is not None and hasattr(self._ai_index, "close"):
             self._ai_index.close()
+        self.inspector.shutdown()
         self.audition.close()
         self.table_model.shutdown()
         self.thumbnail_manager.shutdown()

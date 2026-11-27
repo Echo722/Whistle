@@ -16,10 +16,12 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from audiosearch.audioio.video import VideoProbeInfo, is_video_path
 from audiosearch.audition.covers import CoverImage, CoverResolver
 from audiosearch.browser import theme
 from audiosearch.browser.formatting import (
@@ -30,6 +32,11 @@ from audiosearch.browser.formatting import (
     format_size,
 )
 from audiosearch.browser.theme import mono_font
+from audiosearch.browser.video_preview import (
+    VideoCanvasWidget,
+    VideoFrameWorker,
+    VideoPopoutDialog,
+)
 from audiosearch.library.metadata_fields import extract_inspector_summary
 from audiosearch.library.store import FileRecord
 
@@ -111,6 +118,7 @@ class InspectorPanel(QFrame):
     editMetadataRequested = Signal(int)  # file_id
     navigateToFolderRequested = Signal(int)  # file_id
     statusMessageRequested = Signal(str)  # ephemeral status message
+    togglePlayRequested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -124,6 +132,11 @@ class InspectorPanel(QFrame):
         self._resolver = CoverResolver()
         self._pool = QThreadPool.globalInstance()
         self._cover_gen = 0
+        self._video_gen = 0
+        self._current_is_video = False
+        self._current_title = ""
+        self._current_video_meta = ""
+        self._last_video_time = 0.0
         self._current_file_id: int | None = None
         self._current_full_path: Path | None = None
         self._current_folder_path: str = ""
@@ -136,16 +149,39 @@ class InspectorPanel(QFrame):
         self._signals = _CoverSignals()
         self._signals.resolved.connect(self._on_cover_resolved)
 
+        self._video_worker = VideoFrameWorker(self)
+        self._video_worker.videoLoaded.connect(self._on_video_loaded)
+        self._video_worker.frameReady.connect(self._on_video_frame_ready)
+        self._video_worker.videoFailed.connect(self._on_video_failed)
+        self._popout_dialog: VideoPopoutDialog | None = None
+
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 12, 12, 12)
         outer.setSpacing(9)
 
+        self.media_stack = QStackedWidget(self)
+        self.media_stack.setFixedHeight(COVER_SIZE)
+
+        cover_wrap = QWidget(self.media_stack)
+        cover_wrap.setStyleSheet("background: transparent;")
+        cover_box = QVBoxLayout(cover_wrap)
+        cover_box.setContentsMargins(0, 0, 0, 0)
+        cover_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.cover_label = QLabel("")
         self.cover_label.setObjectName("coverCard")
         self.cover_label.setFixedSize(COVER_SIZE, COVER_SIZE)
         self.cover_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.cover_label.setPixmap(_build_cover_placeholder(COVER_SIZE, "未选择素材"))
-        outer.addWidget(self.cover_label, 0, Qt.AlignmentFlag.AlignHCenter)
+        cover_box.addWidget(self.cover_label, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        self.video_canvas = VideoCanvasWidget(show_popout_btn=True, parent=self.media_stack)
+        self.video_canvas.togglePlayRequested.connect(self.togglePlayRequested.emit)
+        self.video_canvas.popOutRequested.connect(self.open_video_popout)
+
+        self.media_stack.addWidget(cover_wrap)
+        self.media_stack.addWidget(self.video_canvas)
+        self.media_stack.setCurrentIndex(0)
+        outer.addWidget(self.media_stack)
 
         self.title_label = QLabel("未选择素材")
         self.title_label.setWordWrap(True)
@@ -447,6 +483,14 @@ class InspectorPanel(QFrame):
             self.flush_pending_note()
         self._cover_gen += 1
         if rec is None:
+            self._current_is_video = False
+            self._current_title = ""
+            self._current_video_meta = ""
+            self._last_video_time = 0.0
+            self._video_worker.clear()
+            self.video_canvas.clear("未选择素材")
+            self.media_stack.setCurrentIndex(0)
+            self.media_stack.setFixedHeight(COVER_SIZE)
             self._current_file_id = None
             self._current_full_path = None
             self._current_folder_path = ""
@@ -475,8 +519,16 @@ class InspectorPanel(QFrame):
 
         self._current_file_id = rec.id
         self._current_full_path = rec.full_path
+        self._current_title = rec.filename
+        is_video = is_video_path(rec.full_path)
+        self._current_is_video = is_video
         self.fav_btn.setEnabled(True)
-        self.edit_meta_btn.setEnabled(True)
+        self.edit_meta_btn.setEnabled(not is_video)
+        self.edit_meta_btn.setToolTip(
+            "视频文件暂不支持本地写回编辑"
+            if is_video
+            else "编辑本地元数据、UCS 分类或从文件名解析（不会立即修改磁盘文件）"
+        )
         self.dirty_pill.setVisible(bool(getattr(rec, "is_dirty", False)))
         self._update_fav_btn_visual(rec.favorite)
         self._suppress_note = True
@@ -489,9 +541,17 @@ class InspectorPanel(QFrame):
         self.title_label.setText(rec.filename)
         status = "在线" if rec.is_available else "离线"
         self._pill_ext.setText((rec.ext or "—").upper())
-        self._pill_sr.setText(format_sample_rate(rec.sample_rate))
-        self._pill_bit.setText(format_bit_depth(rec.bit_depth))
-        self._pill_ch.setText(format_channels(rec.channels))
+        if is_video and rec.sample_rate <= 0:
+            self._pill_sr.setText("无音轨")
+            self._pill_bit.setVisible(False)
+            self._pill_ch.setVisible(False)
+        else:
+            self._pill_sr.setText(format_sample_rate(rec.sample_rate))
+            show_bit = (not is_video) or rec.bit_depth > 0
+            self._pill_bit.setVisible(show_bit)
+            self._pill_bit.setText(format_bit_depth(rec.bit_depth))
+            self._pill_ch.setVisible(True)
+            self._pill_ch.setText(format_channels(rec.channels))
         self._pill_dur.setText(format_duration(rec.duration_sec))
         self._pill_size.setText(format_size(rec.size_bytes))
         self._pill_status.setText(status)
@@ -542,14 +602,149 @@ class InspectorPanel(QFrame):
                     lines.append(f"• {label}: {val}")
         self.detail_label.setText("\n\n".join(lines) if lines else "无内嵌描述")
 
-        self.cover_label.setText("")
-        self.cover_label.setPixmap(
-            _build_cover_placeholder(COVER_SIZE, "加载封面…" if rec.is_available else "文件离线")
-        )
-        if rec.is_available:
-            self._pool.start(
-                _CoverTask(self._resolver, rec.full_path, self._cover_gen, self._signals)
+        if is_video and rec.is_available:
+            self._last_video_time = 0.0
+            self._current_video_meta = self._build_video_meta_from_fields(fields, rec.sample_rate <= 0)
+            self.media_stack.setMinimumHeight(COVER_SIZE)
+            self.media_stack.setMaximumHeight(240)
+            self.media_stack.setCurrentIndex(1)
+            self.video_canvas.clear("加载视频帧…")
+            self.video_canvas.set_meta_text(self._current_video_meta)
+            max_w, max_h = self._target_video_decode_size()
+            self._video_worker.set_active(self._should_decode_video())
+            self._video_gen = self._video_worker.load_video(
+                rec.full_path, max_w=max_w, max_h=max_h
             )
+            if self._popout_dialog is not None and self._popout_dialog.isVisible():
+                self._popout_dialog.set_header_info(rec.filename, self._current_video_meta)
+                self._popout_dialog.canvas.clear("加载视频帧…")
+        else:
+            self._video_worker.clear()
+            self.video_canvas.clear("未选择视频")
+            self.media_stack.setCurrentIndex(0)
+            self.media_stack.setFixedHeight(COVER_SIZE)
+            if self._popout_dialog is not None and self._popout_dialog.isVisible():
+                self._popout_dialog.close()
+            self.cover_label.setText("")
+            self.cover_label.setPixmap(
+                _build_cover_placeholder(COVER_SIZE, "加载封面…" if rec.is_available else "文件离线")
+            )
+            if rec.is_available:
+                self._pool.start(
+                    _CoverTask(self._resolver, rec.full_path, self._cover_gen, self._signals)
+                )
+
+    @staticmethod
+    def _build_video_meta_from_fields(
+        fields: list[tuple[str, str, str]] | None, silent_audio: bool
+    ) -> str:
+        fmap = {str(k).lower(): str(v) for k, v, _ in (fields or ())}
+        parts: list[str] = []
+        if fmap.get("video_resolution"):
+            parts.append(fmap["video_resolution"])
+        if fmap.get("video_fps"):
+            parts.append(f"{fmap['video_fps']}fps")
+        if silent_audio:
+            parts.append("无音轨")
+        return " · ".join(parts)
+
+    def _should_decode_video(self) -> bool:
+        pop_vis = self._popout_dialog is not None and self._popout_dialog.isVisible()
+        return self.isVisible() or pop_vis
+
+    def _target_video_decode_size(self) -> tuple[int, int]:
+        if self._popout_dialog is not None and self._popout_dialog.isVisible():
+            cw = max(640, self._popout_dialog.canvas.width())
+            ch = max(360, self._popout_dialog.canvas.height())
+            return min(1280, cw), min(720, ch)
+        return max(380, self.width()), 320
+
+    def sync_video_time(self, seconds: float) -> None:
+        if not self._current_is_video or self._video_gen <= 0:
+            return
+        self._last_video_time = max(0.0, float(seconds))
+        self._video_worker.request_time(self._video_gen, self._last_video_time)
+
+    def set_video_playing(self, playing: bool) -> None:
+        self.video_canvas.set_playing(playing)
+        if self._popout_dialog is not None and self._popout_dialog.isVisible():
+            self._popout_dialog.set_playing(playing)
+
+    def open_video_popout(self) -> None:
+        if not self._current_is_video:
+            return
+        if self._popout_dialog is None:
+            self._popout_dialog = VideoPopoutDialog(self)
+            self._popout_dialog.togglePlayRequested.connect(self.togglePlayRequested.emit)
+            self._popout_dialog.closed.connect(self._on_popout_closed)
+        self._popout_dialog.set_header_info(self._current_title, self._current_video_meta)
+        self._popout_dialog.canvas.set_image(self.video_canvas.current_image())
+        self._popout_dialog.set_playing(self.video_canvas._playing)
+        self._popout_dialog.show()
+        self._popout_dialog.raise_()
+        self._popout_dialog.activateWindow()
+        max_w, max_h = self._target_video_decode_size()
+        self._video_worker.set_max_size(max_w, max_h)
+        self._video_worker.set_active(True)
+        self.sync_video_time(self._last_video_time)
+
+    @Slot()
+    def _on_popout_closed(self) -> None:
+        max_w, max_h = self._target_video_decode_size()
+        self._video_worker.set_max_size(max_w, max_h)
+        self._video_worker.set_active(self._should_decode_video())
+
+    @Slot(int, object)
+    def _on_video_loaded(self, generation: int, info: VideoProbeInfo) -> None:
+        if generation != self._video_gen:
+            return
+        parts: list[str] = []
+        if info.width > 0 and info.height > 0:
+            parts.append(f"{info.width}×{info.height}")
+        if info.fps > 0.0:
+            parts.append(f"{info.fps:.0f}fps" if abs(info.fps - round(info.fps)) < 0.05 else f"{info.fps:.2f}fps")
+        if not info.has_audio:
+            parts.append("无音轨")
+        self._current_video_meta = " · ".join(parts)
+        self.video_canvas.set_meta_text(self._current_video_meta)
+        if self._popout_dialog is not None and self._popout_dialog.isVisible():
+            self._popout_dialog.set_header_info(self._current_title, self._current_video_meta)
+
+    @Slot(int, float, object)
+    def _on_video_frame_ready(self, generation: int, _pts_sec: float, image: QImage) -> None:
+        if generation != self._video_gen:
+            return
+        self.video_canvas.set_image(image)
+        if self._popout_dialog is not None and self._popout_dialog.isVisible():
+            self._popout_dialog.canvas.set_image(image)
+
+    @Slot(int, str)
+    def _on_video_failed(self, generation: int, message: str) -> None:
+        if generation != self._video_gen:
+            return
+        self.video_canvas.set_image(None)
+        self.video_canvas.set_status_text(f"视频解码失败：{message}")
+        if self._popout_dialog is not None and self._popout_dialog.isVisible():
+            self._popout_dialog.canvas.set_image(None)
+            self._popout_dialog.canvas.set_status_text(f"视频解码失败：{message}")
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._video_worker.set_active(self._should_decode_video())
+        if self._current_is_video and self._video_gen > 0:
+            self._video_worker.request_time(self._video_gen, self._last_video_time)
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        self._video_worker.set_active(self._should_decode_video())
+
+    def shutdown(self) -> None:
+        if self._popout_dialog is not None:
+            try:
+                self._popout_dialog.close()
+            except Exception:
+                pass
+        self._video_worker.shutdown()
 
     @Slot(int, object)
     def _on_cover_resolved(self, generation: int, cover: CoverImage | None) -> None:

@@ -16,6 +16,7 @@ from typing import BinaryIO
 import numpy as np
 
 from .errors import AssetOfflineError, DecodeError, SourceRangeError
+from .video import is_video_path, open_video_audio
 from .wav import WavInfo, parse_wav
 
 # 65_536 stereo frames is 512 KiB of float32: small enough to interleave with
@@ -348,10 +349,12 @@ def open_pedalboard_audio(path: str | Path) -> _SoundFilePedalboardFallback:
 
 
 def open_audio_file(path: str | Path):
-    """Open ``path`` via soundfile, falling back to pure-Python WAV or pedalboard."""
+    """Open ``path`` via soundfile, falling back to pure-Python WAV, pedalboard, or PyAV video audio."""
     import soundfile as sf
 
     file_path = Path(path)
+    if is_video_path(file_path):
+        return open_video_audio(file_path)
     try:
         return sf.SoundFile(str(file_path), "r")
     except Exception as sf_exc:

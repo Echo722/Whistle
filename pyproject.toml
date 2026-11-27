@@ -25,6 +25,7 @@ desktop = ["PySide6-Essentials>=6.8,<7"]
 # out of `ai` so the desktop does not drag torch/transformers in just to hear a
 # file; kept out of `desktop` so a headless install stays light.
 playback = [
+    "av>=14,<17",
     "numpy>=2.1,<3",
     "pedalboard>=0.9.26",
     "sounddevice>=0.5,<1",

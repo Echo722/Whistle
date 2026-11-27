@@ -12,11 +12,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from audiosearch.audioio.video import VIDEO_EXTENSIONS, is_video_path, probe_video
 from audiosearch.audioio.wav import read_wav_info
 from audiosearch.catalog.embedded import EmbeddedMetadata, read_embedded_metadata
 from audiosearch.library.schema import ensure_schema, open_connection
 
 AUDIO_EXTENSIONS = frozenset({".wav", ".aif", ".aiff", ".flac", ".ogg", ".mp3", ".opus"})
+MEDIA_EXTENSIONS = AUDIO_EXTENSIONS | VIDEO_EXTENSIONS
 BATCH_SIZE = 500
 _PROGRESS_INTERVAL_SEC = 0.15
 
@@ -60,8 +62,9 @@ class ScanReport:
 class LibraryScanner:
     """Walks a root directory and incrementally updates SQLite + FTS5."""
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(self, db_path: str | Path, *, include_videos: bool = True) -> None:
         self.db_path = Path(db_path)
+        self._include_videos = bool(include_videos)
         self._pause_clear = threading.Event()
         self._pause_clear.set()  # set => running, clear => paused
         self._cancel = threading.Event()
@@ -160,6 +163,7 @@ class LibraryScanner:
                     errors += 1
                     continue
 
+                allowed_exts = MEDIA_EXTENSIONS if self._include_videos else AUDIO_EXTENSIONS
                 subdirs: list[os.DirEntry[str]] = []
                 audio_entries: list[os.DirEntry[str]] = []
                 for entry in entries:
@@ -172,7 +176,7 @@ class LibraryScanner:
                             subdirs.append(entry)
                         elif entry.is_file(follow_symlinks=False):
                             ext = Path(entry.name).suffix.lower()
-                            if ext in AUDIO_EXTENSIONS:
+                            if ext in allowed_exts:
                                 audio_entries.append(entry)
                     except OSError:
                         errors += 1
@@ -452,6 +456,52 @@ def _inspect_audio_file_impl(
     sample_rate = 0
     channels = 0
     bit_depth = 0
+    description = ""
+    embedded_text = ""
+    bext_dict: dict[str, str] = {}
+    ixml_dict: dict[str, str] = {}
+    fields: list[tuple[str, str]] = []
+    package = _derive_package(rel_path, root_label)
+
+    if is_video_path(path):
+        vinfo = probe_video(path)
+        duration_sec = vinfo.duration_sec
+        sample_rate = vinfo.audio_sample_rate if vinfo.has_audio else 0
+        channels = vinfo.audio_channels if vinfo.has_audio else 0
+        bit_depth = 0
+        if vinfo.width > 0 and vinfo.height > 0:
+            fields.append(("video_resolution", f"{vinfo.width}x{vinfo.height}"))
+        if vinfo.fps > 0.0:
+            fields.append(("video_fps", f"{vinfo.fps:.2f}"))
+        if vinfo.video_codec:
+            fields.append(("video_codec", vinfo.video_codec))
+        fields.append(("audio_codec", vinfo.audio_codec if vinfo.has_audio else "无音轨"))
+        for tag_k, tag_v in vinfo.tags.items():
+            fields.append((f"video_tag_{tag_k.lower()}", tag_v))
+        description = vinfo.comment or vinfo.title
+        text_parts = [f[1] for f in fields if f[1]]
+        embedded_text = " ".join(text_parts)
+        return _ScannedFile(
+            existing_id=existing_id,
+            root_id=root_id,
+            folder_id=folder_id,
+            rel_path=rel_path,
+            filename=path.name,
+            ext=path.suffix.lower().lstrip("."),
+            size_bytes=size_bytes,
+            mtime_ns=mtime_ns,
+            duration_sec=duration_sec,
+            sample_rate=sample_rate,
+            channels=channels,
+            bit_depth=bit_depth,
+            package=package,
+            description=description,
+            embedded_text=embedded_text,
+            bext_json=json.dumps(bext_dict, ensure_ascii=False),
+            ixml_json=json.dumps(ixml_dict, ensure_ascii=False),
+            indexed_at=time.time(),
+            fields=fields,
+        )
 
     try:
         import soundfile as sf
@@ -473,13 +523,6 @@ def _inspect_audio_file_impl(
                 return None
         else:
             return None
-
-    description = ""
-    embedded_text = ""
-    bext_dict: dict[str, str] = {}
-    ixml_dict: dict[str, str] = {}
-    fields: list[tuple[str, str]] = []
-    package = _derive_package(rel_path, root_label)
 
     if path.suffix.lower() == ".wav":
         try:

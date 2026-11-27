@@ -442,6 +442,8 @@ class VectorIndexer:
                 existing_audio = index.indexed_audio_map()
                 audio_todo: list[FileRecord] = []
                 for rec in all_records:
+                    if rec.sample_rate <= 0 or rec.channels <= 0:
+                        continue
                     prev_mtime = existing_audio.get(rec.id)
                     if prev_mtime is not None and prev_mtime == rec.mtime_ns:
                         reused_audio += 1
