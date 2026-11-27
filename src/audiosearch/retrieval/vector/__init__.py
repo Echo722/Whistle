@@ -1,0 +1,1 @@
+"""Agent B: vector retrieval."""

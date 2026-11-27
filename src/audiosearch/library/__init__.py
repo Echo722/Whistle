@@ -1,0 +1,73 @@
+"""Local SQLite + FTS5 audio library, incremental scanner, and peak cache."""
+
+from audiosearch.library.peaks import (
+    THUMBNAIL_POINTS,
+    PeakData,
+    analyze_spectral_frames,
+    compute_file_peaks,
+    compute_thumbnail_peaks,
+    compute_thumbnail_with_spectral,
+    decode_thumbnail_spectral,
+    peaks_to_thumbnail,
+    peaks_to_thumbnail_spectral,
+    resample_spectral_columns,
+    shape_thumbnail_envelope,
+    spectral_color_rgb,
+    spectral_fft_size,
+    thumbnail_width_fraction,
+)
+from audiosearch.library.duplicates import (
+    DuplicateMode,
+    DuplicateProgress,
+    DuplicateRowRecord,
+    DuplicateScanReport,
+    DuplicateScanner,
+)
+from audiosearch.library.scanner import LibraryScanner, ScanProgress, ScanReport
+from audiosearch.library.search_syntax import ParsedQuery, build_where_clause, parse_me_query
+from audiosearch.library.store import (
+    CollectionFolderRecord,
+    CollectionRecord,
+    FileRecord,
+    FolderRecord,
+    LibraryStore,
+    QueryFilter,
+    RootRecord,
+    SearchHistoryRecord,
+)
+
+__all__ = [
+    "CollectionFolderRecord",
+    "CollectionRecord",
+    "DuplicateMode",
+    "DuplicateProgress",
+    "DuplicateRowRecord",
+    "DuplicateScanReport",
+    "DuplicateScanner",
+    "FileRecord",
+    "FolderRecord",
+    "LibraryScanner",
+    "LibraryStore",
+    "ParsedQuery",
+    "PeakData",
+    "QueryFilter",
+    "RootRecord",
+    "ScanProgress",
+    "ScanReport",
+    "SearchHistoryRecord",
+    "THUMBNAIL_POINTS",
+    "analyze_spectral_frames",
+    "build_where_clause",
+    "compute_file_peaks",
+    "compute_thumbnail_peaks",
+    "compute_thumbnail_with_spectral",
+    "decode_thumbnail_spectral",
+    "parse_me_query",
+    "peaks_to_thumbnail",
+    "peaks_to_thumbnail_spectral",
+    "resample_spectral_columns",
+    "shape_thumbnail_envelope",
+    "spectral_color_rgb",
+    "spectral_fft_size",
+    "thumbnail_width_fraction",
+]

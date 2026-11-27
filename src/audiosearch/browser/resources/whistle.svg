@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <clipPath id="tile">
+      <rect x="16" y="16" width="480" height="480" rx="112"/>
+    </clipPath>
+  </defs>
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="#1B1A18"/>
+  <g clip-path="url(#tile)">
+    <!-- Plump dome owl silhouette with soft wide ear tufts -->
+    <path fill="#ECE9E2" d="
+      M 38 512
+      C 36 376, 62 276, 118 214
+      C 90 184, 78 144, 98 130
+      C 116 117, 144 130, 166 150
+      C 196 124, 226 116, 256 116
+      C 286 116, 316 124, 346 150
+      C 368 130, 396 117, 414 130
+      C 434 144, 422 184, 394 214
+      C 450 276, 476 376, 474 512
+      Z"/>
+    <!-- Eyes -->
+    <ellipse cx="170" cy="302" rx="31" ry="37" fill="#1B1A18"/>
+    <ellipse cx="342" cy="302" rx="31" ry="37" fill="#1B1A18"/>
+    <!-- Eye highlights -->
+    <circle cx="182" cy="287" r="11" fill="#ECE9E2"/>
+    <circle cx="354" cy="287" r="11" fill="#ECE9E2"/>
+    <!-- Soft rounded terracotta beak -->
+    <path fill="#D97757" d="
+      M 256 322
+      C 284 322, 293 340, 288 359
+      C 283 377, 267 390, 256 390
+      C 245 390, 229 377, 224 359
+      C 219 340, 228 322, 256 322
+      Z"/>
+  </g>
+</svg>

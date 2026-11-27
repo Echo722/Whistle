@@ -1,0 +1,62 @@
+# Test scratch directories: several evaluation tests build temp worlds in the
+# repository root and do not remove them on failure, so they must never show up
+# as untracked files. Real outputs still belong under .local/.
+/quality010-world-*/
+/quality010-wiring-*/
+/audiosearch-page-*/
+/pytest-of-*/
+/probe-page-*/
+
+# Source assets and generated/private data never belong in source control.
+[Mm]agic [Bb]undle*/
+/samples/audio/
+.local/
+data/
+models/
+cache/
+logs/
+artifacts/
+dist/
+build/
+.venv/
+.claude/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.env
+.env.*
+!.env.example
+*.local.toml
+*.wav
+*.WAV
+*.flac
+*.mp3
+*.ogg
+*.aif
+*.aiff
+*.m4a
+*.opus
+*.mp4
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.gguf
+*.npy
+*.npz
+*.index
+*.hnsw
+*.sqlite*
+*.db
+*.db-wal
+*.db-shm
+*.log
+*.spec
+!packaging/*.spec
+# Earlier reports contain private library paths and machine details.
+音效搜索工具方案（Claude版）.md
+harken_analysis（grok bot）.md
