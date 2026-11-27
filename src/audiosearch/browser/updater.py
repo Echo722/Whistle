@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -18,8 +19,8 @@ from typing import Any
 from audiosearch.browser.runtime_paths import executable_dir, is_frozen
 
 APP_NAME = "Whistle"
-APP_VERSION = "0.1.1"
-RUNTIME_ABI = 1
+APP_VERSION = "0.2.0"
+RUNTIME_ABI = 2
 DEFAULT_GITHUB_REPO = "Echo722/Whistle"
 
 PATCH_DIR_NAME = "app_patch"
@@ -224,9 +225,46 @@ def check_for_updates(
     )
 
 
+def _rename_dir_with_retry(
+    src: Path,
+    dst: Path,
+    *,
+    attempts: int = 12,
+    base_delay: float = 0.05,
+) -> None:
+    """Retry transient Windows Defender / indexer ``PermissionError`` locks on directory rename."""
+    for idx in range(attempts):
+        try:
+            src.rename(dst)
+            return
+        except PermissionError:
+            if idx + 1 >= attempts:
+                raise
+            time.sleep(base_delay * (idx + 1))
+
+
+def _rmtree_with_retry(
+    target: Path,
+    *,
+    attempts: int = 8,
+    base_delay: float = 0.05,
+) -> None:
+    """Retry transient Windows handle locks when clearing patch staging directories."""
+    for idx in range(attempts):
+        if not target.exists():
+            return
+        try:
+            shutil.rmtree(target)
+            return
+        except PermissionError:
+            if idx + 1 >= attempts:
+                raise
+            time.sleep(base_delay * (idx + 1))
+
+
 def _validate_and_extract_zip(zip_path: Path, target_dir: Path) -> None:
     if target_dir.exists():
-        shutil.rmtree(target_dir)
+        _rmtree_with_retry(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     target_resolved = target_dir.resolve()
 
@@ -303,16 +341,19 @@ def apply_patch_zip(
     (next_dir / BOOT_SENTINEL_FILENAME).write_text("0", encoding="utf-8")
 
     if prev_dir.exists():
-        shutil.rmtree(prev_dir)
+        _rmtree_with_retry(prev_dir)
     moved_prev: Path | None = None
     if patch_dir.exists():
-        patch_dir.rename(prev_dir)
+        _rename_dir_with_retry(patch_dir, prev_dir)
         moved_prev = prev_dir
     try:
-        next_dir.rename(patch_dir)
+        _rename_dir_with_retry(next_dir, patch_dir)
     except Exception:
         if moved_prev is not None and moved_prev.exists() and not patch_dir.exists():
-            moved_prev.rename(patch_dir)
+            try:
+                _rename_dir_with_retry(moved_prev, patch_dir)
+            except OSError:
+                pass
         raise
 
     return PatchInstallResult(
@@ -381,11 +422,11 @@ def rollback_patch(app_root: Path | None = None) -> bool:
         shutil.rmtree(failed_dir, ignore_errors=True)
     if patch_dir.exists():
         try:
-            patch_dir.rename(failed_dir)
+            _rename_dir_with_retry(patch_dir, failed_dir)
         except OSError:
             shutil.rmtree(patch_dir, ignore_errors=True)
     if prev_dir.exists():
-        prev_dir.rename(patch_dir)
+        _rename_dir_with_retry(prev_dir, patch_dir)
     return True
 
 

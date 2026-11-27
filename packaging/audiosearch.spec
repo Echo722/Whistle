@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 from pathlib import Path
 
@@ -26,6 +27,13 @@ for pkg in ("_sounddevice_data", "_soundfile_data", "pedalboard", "av"):
     datas += d
     binaries += b
     hiddenimports += h
+
+_av_spec = importlib.util.find_spec("av")
+if _av_spec and _av_spec.origin:
+    _av_libs_dir = Path(_av_spec.origin).resolve().parent.parent / "av.libs"
+    if _av_libs_dir.is_dir():
+        for _dll in sorted(_av_libs_dir.glob("*.dll")):
+            binaries.append((str(_dll), "av.libs"))
 
 if WITH_AI:
     for pkg in ("torch", "soxr", "tokenizers", "safetensors"):

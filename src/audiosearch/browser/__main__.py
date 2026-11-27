@@ -95,7 +95,7 @@ def run_smoke_test(db_path: Path | None = None) -> tuple[int, dict[str, Any]]:
     icon_path = resolve_app_icon_path()
     report["app_icon"] = bool(icon_path is not None and icon_path.is_file())
 
-    core_mods = ("PySide6", "sounddevice", "soundfile", "pedalboard", "mutagen")
+    core_mods = ("PySide6", "sounddevice", "soundfile", "pedalboard", "mutagen", "av")
     for mod in core_mods:
         try:
             importlib.import_module(mod)

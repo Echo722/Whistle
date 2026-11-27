@@ -8,9 +8,10 @@ import multiprocessing
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 
-_RUNTIME_ABI = 1
+_RUNTIME_ABI = 2
 _PATCH_DIR_NAME = "app_patch"
 _PATCH_PREV_DIR_NAME = "app_patch.prev"
 _PATCH_FAILED_DIR_NAME = "app_patch.failed"
@@ -27,6 +28,24 @@ def _set_windows_app_id() -> None:
         pass
 
 
+def _rename_dir_with_retry(
+    src: Path,
+    dst: Path,
+    *,
+    attempts: int = 12,
+    base_delay: float = 0.05,
+) -> None:
+    """Retry transient Windows directory locks during launcher rollback swaps."""
+    for idx in range(attempts):
+        try:
+            src.rename(dst)
+            return
+        except PermissionError:
+            if idx + 1 >= attempts:
+                raise
+            time.sleep(base_delay * (idx + 1))
+
+
 def _rollback_patch_dirs(exe_dir: Path) -> None:
     patch_dir = exe_dir / _PATCH_DIR_NAME
     prev_dir = exe_dir / _PATCH_PREV_DIR_NAME
@@ -35,12 +54,12 @@ def _rollback_patch_dirs(exe_dir: Path) -> None:
         shutil.rmtree(failed_dir, ignore_errors=True)
     if patch_dir.exists():
         try:
-            patch_dir.rename(failed_dir)
+            _rename_dir_with_retry(patch_dir, failed_dir)
         except OSError:
             shutil.rmtree(patch_dir, ignore_errors=True)
     if prev_dir.exists():
         try:
-            prev_dir.rename(patch_dir)
+            _rename_dir_with_retry(prev_dir, patch_dir)
         except OSError:
             pass
 

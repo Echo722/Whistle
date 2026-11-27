@@ -17,6 +17,7 @@ from audiosearch.browser.runtime_paths import resolve_app_icon_path
 from audiosearch.browser.update_dialog import UpdateDialog
 from audiosearch.browser.updater import (
     APP_VERSION,
+    RUNTIME_ABI,
     UpdateCheckResult,
     UpdateManifest,
     active_patch_info,
@@ -177,16 +178,25 @@ def test_launcher_boot_attempt_auto_rollback(tmp_path: Path, monkeypatch) -> Non
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    assert mod._RUNTIME_ABI == RUNTIME_ABI
 
     app_root = tmp_path / "Whistle"
     z2 = tmp_path / "v2.zip"
-    sha2, sz2 = _build_patch_zip(z2, version="0.2.0", marker="v2")
-    apply_patch_zip(z2, UpdateManifest("0.2.0", 1, "", sha2, sz2, "", "", ""), app_root=app_root)
+    sha2, sz2 = _build_patch_zip(z2, version="0.2.0", min_abi=RUNTIME_ABI, marker="v2")
+    apply_patch_zip(
+        z2,
+        UpdateManifest("0.2.0", RUNTIME_ABI, "", sha2, sz2, "", "", ""),
+        app_root=app_root,
+    )
     mark_patch_boot_healthy(app_root)
 
     z3 = tmp_path / "v3.zip"
-    sha3, sz3 = _build_patch_zip(z3, version="0.2.1", marker="v3")
-    apply_patch_zip(z3, UpdateManifest("0.2.1", 1, "", sha3, sz3, "", "", ""), app_root=app_root)
+    sha3, sz3 = _build_patch_zip(z3, version="0.2.1", min_abi=RUNTIME_ABI, marker="v3")
+    apply_patch_zip(
+        z3,
+        UpdateManifest("0.2.1", RUNTIME_ABI, "", sha3, sz3, "", "", ""),
+        app_root=app_root,
+    )
 
     # First launch writes "1" into .boot_attempt and activates v0.2.1
     monkeypatch.setattr(sys, "path", list(sys.path))
@@ -341,7 +351,7 @@ def test_build_patch_py_output_passes_updater_check_and_apply(tmp_path: Path) ->
     payload = json.loads(latest_json.read_text(encoding="utf-8"))
     raw = patch_zip.read_bytes()
     assert payload["version"] == "0.2.0"
-    assert payload["min_runtime_abi"] >= 1
+    assert payload["min_runtime_abi"] == RUNTIME_ABI
     assert payload["patch_sha256"] == hashlib.sha256(raw).hexdigest().lower()
     assert payload["patch_size"] == len(raw)
     assert payload["notes"] == "CI patch test"
@@ -354,6 +364,14 @@ def test_build_patch_py_output_passes_updater_check_and_apply(tmp_path: Path) ->
     check_res = check_for_updates(manifest_url=local_manifest.as_uri(), current_version="0.1.0")
     assert check_res.status == "patch_available"
     assert check_res.manifest is not None
+
+    if RUNTIME_ABI > 1:
+        old_abi_res = check_for_updates(
+            manifest_url=local_manifest.as_uri(),
+            current_version="0.1.0",
+            current_runtime_abi=1,
+        )
+        assert old_abi_res.status == "full_update_required"
 
     app_root = tmp_path / "WhistleApp"
     app_root.mkdir(parents=True)

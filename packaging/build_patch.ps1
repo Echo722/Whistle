@@ -2,13 +2,23 @@
     [Parameter(Mandatory = $true)][string]$Version,
     [string]$Notes = "",
     [string]$Repo = "Echo722/Whistle",
-    [int]$MinRuntimeAbi = 1,
+    [int]$MinRuntimeAbi = 0,
     [string]$OutDir = ".local\dist\patches"
 )
 
 $ErrorActionPreference = "Stop"
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+if ($MinRuntimeAbi -le 0) {
+    $MinRuntimeAbi = 1
+    $UpdaterPy = Join-Path $Root "src\audiosearch\browser\updater.py"
+    if (Test-Path $UpdaterPy) {
+        $UpdaterSrc = Get-Content -Path $UpdaterPy -Raw -Encoding UTF8
+        if ($UpdaterSrc -match '(?m)^RUNTIME_ABI\s*=\s*(\d+)') {
+            $MinRuntimeAbi = [int]$Matches[1]
+        }
+    }
+}
 Set-Location $Root
 
 $CleanVer = $Version.Trim().TrimStart("v", "V")

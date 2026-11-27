@@ -122,6 +122,7 @@ def test_run_smoke_test_reports_core_ok(tmp_path: Path):
     assert report["core"]["soundfile"] is True
     assert report["core"]["pedalboard"] is True
     assert report["core"]["mutagen"] is True
+    assert report["core"]["av"] is True
     if "cuda_available" in report["ai"]:
         assert isinstance(report["ai"].get("cuda_usable"), bool)
 
@@ -147,6 +148,8 @@ def test_packaging_spec_and_launcher_are_valid():
         "_sounddevice_data",
         "_soundfile_data",
         "pedalboard",
+        "av",
+        "av.libs",
         "open_clip",
         "torch",
         "audiosearch_spot_bridge.lua",
